@@ -31,7 +31,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { WorkUnitWithDetails, OrderItem, Product, ExceptionType } from "@shared/schema";
+import type { WorkUnitWithDetails, OrderItem, Product, ExceptionType, UserSettings } from "@shared/schema";
 import { ExceptionDialog } from "@/components/orders/exception-dialog";
 import { getCurrentWeekRange } from "@/lib/date-utils";
 import { format } from "date-fns";
@@ -110,6 +110,12 @@ export default function SeparacaoPage() {
   const [sectionFilter, setSectionFilter] = useState<string>("all");
 
   const [sessionRestored, setSessionRestored] = useState(false);
+  const [multiplierValue, setMultiplierValue] = useState(1);
+  const [manualQtyAllowed, setManualQtyAllowed] = useState<Record<string, boolean>>({});
+
+  const userSettings = (user?.settings as UserSettings) || {};
+  const hasManualQtyPermission = !!userSettings.allowManualQty;
+  const hasMultiplierPermission = !!userSettings.allowMultiplier;
 
   const workUnitsQueryKey = useSessionQueryKey(["/api/work-units", "separacao"]);
 
@@ -202,6 +208,25 @@ export default function SeparacaoPage() {
       setCurrentProductIndex(0);
     }
   }, [filteredAggregatedProducts.length, currentProductIndex]);
+
+  useEffect(() => {
+    if (!hasManualQtyPermission && !hasMultiplierPermission) return;
+    if (aggregatedProducts.length === 0) return;
+
+    const productIds = aggregatedProducts.map(ap => ap.product.id).filter(id => !(id in manualQtyAllowed));
+    if (productIds.length === 0) return;
+
+    apiRequest("POST", "/api/manual-qty-rules/check", { productIds })
+      .then(res => res.json())
+      .then((results: Record<string, boolean>) => {
+        setManualQtyAllowed(prev => ({ ...prev, ...results }));
+      })
+      .catch(() => {
+        const fallback: Record<string, boolean> = {};
+        productIds.forEach(id => { fallback[id] = false; });
+        setManualQtyAllowed(prev => ({ ...prev, ...fallback }));
+      });
+  }, [aggregatedProducts, hasManualQtyPermission, hasMultiplierPermission]);
 
   useEffect(() => {
     if (workUnits && user && !sessionRestored) {
@@ -467,27 +492,40 @@ export default function SeparacaoPage() {
     }
   };
 
-  const handleIncrementProduct = async (ap: AggregatedProduct) => {
+  const handleIncrementProduct = async (ap: AggregatedProduct, qty: number = 1) => {
     const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
     if (remaining <= 0) return;
 
-    const incompleteItem = ap.items.find(i =>
-      Number(i.separatedQty) + Number(i.exceptionQty || 0) < Number(i.quantity)
-    );
-    if (!incompleteItem) return;
-
-    const wu = allMyUnits.find(w => w.items.some(i => i.id === incompleteItem.id));
-    if (!wu) return;
-
+    const effectiveQty = Math.min(qty, remaining);
     const barcode = ap.product.barcode;
     if (!barcode) return;
 
     try {
-      const result = await scanItemMutation.mutateAsync({ workUnitId: wu.id, barcode });
-      if (result.status === "success") {
+      let successCount = 0;
+      for (let i = 0; i < effectiveQty; i++) {
+        const incompleteItem = ap.items.find(it =>
+          Number(it.separatedQty) + Number(it.exceptionQty || 0) + successCount < Number(it.quantity)
+        );
+        if (!incompleteItem) break;
+        const wu = allMyUnits.find(w => w.items.some(it => it.id === incompleteItem.id));
+        if (!wu) break;
+
+        try {
+          const result = await scanItemMutation.mutateAsync({ workUnitId: wu.id, barcode });
+          if (result.status === "success") {
+            successCount++;
+          } else {
+            break;
+          }
+        } catch {
+          break;
+        }
+      }
+      if (successCount > 0) {
         setScanStatus("success");
-        setScanMessage(`+1 ${ap.product.name}`);
-      } else if (result.status === "over_quantity") {
+        setScanMessage(`+${successCount} ${ap.product.name}`);
+        setMultiplierValue(1);
+      } else {
         setScanStatus("error");
         setScanMessage("Quantidade excedida!");
       }
@@ -738,18 +776,35 @@ export default function SeparacaoPage() {
                         )}
                       </p>
                     </div>
-                    <Button
-                      size="sm"
-                      className="h-10 w-10 p-0"
-                      onClick={() => handleIncrementProduct(currentProduct)}
-                      disabled={
-                        scanItemMutation.isPending ||
-                        (currentProduct.separatedQty + currentProduct.exceptionQty >= currentProduct.totalQty) ||
-                        !currentProduct.product.barcode
-                      }
-                    >
-                      <Plus className="h-5 w-5" />
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      {hasMultiplierPermission && manualQtyAllowed[currentProduct.product.id] && (
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-muted-foreground">×</span>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={currentProduct.totalQty - currentProduct.separatedQty - currentProduct.exceptionQty}
+                            value={multiplierValue}
+                            onChange={(e) => setMultiplierValue(Math.max(1, parseInt(e.target.value) || 1))}
+                            className="h-10 w-16 text-center text-sm font-bold"
+                          />
+                        </div>
+                      )}
+                      {hasManualQtyPermission && manualQtyAllowed[currentProduct.product.id] && (
+                        <Button
+                          size="sm"
+                          className="h-10 w-10 p-0"
+                          onClick={() => handleIncrementProduct(currentProduct, multiplierValue)}
+                          disabled={
+                            scanItemMutation.isPending ||
+                            (currentProduct.separatedQty + currentProduct.exceptionQty >= currentProduct.totalQty) ||
+                            !currentProduct.product.barcode
+                          }
+                        >
+                          <Plus className="h-5 w-5" />
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 </div>
 

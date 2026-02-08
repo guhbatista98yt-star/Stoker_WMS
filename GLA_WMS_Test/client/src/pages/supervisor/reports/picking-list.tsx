@@ -94,10 +94,11 @@ export default function PickingListReport() {
     // Modal 4 - Generate
     const [isGenerating, setIsGenerating] = useState(false);
 
-    // Fetch data (orders loaded on demand with search button)
-    const { data: ordersData, refetch: refetchOrders } = useQuery({
+    const [ordersLoaded, setOrdersLoaded] = useState(false);
+
+    const { data: ordersData, refetch: refetchOrders, isFetching: isLoadingOrders } = useQuery({
         queryKey: ["/api/orders"],
-        enabled: false, // Don't auto-load, wait for search button
+        enabled: ordersLoaded,
     });
     const orders = (ordersData as any[]) || [];
 
@@ -192,33 +193,35 @@ export default function PickingListReport() {
         },
     });
 
-    // Filter orders based on pickup points
     const filteredOrders = orders.filter(order => {
-        // If "all points" is selected, include all orders
-        if (selectAllPickupPoints) return true;
-
-        // If no specific points selected, don't filter
-        if (selectedPickupPoints.length === 0) return true;
-
-        // Filter by pickup points from order items
-        if (!order.pickupPoints) return false;
-
-        // Handle various formats of pickupPoints (string array, number array, or JSON string if not parsed)
-        let orderPoints: any[] = order.pickupPoints;
-        if (typeof orderPoints === 'string') {
-            try {
-                orderPoints = JSON.parse(orderPoints);
-            } catch (e) {
-                console.error("Failed to parse pickup points for order", order.id, order.pickupPoints);
-                return false;
-            }
+        if (filterDateRange?.from) {
+            const orderDate = new Date(order.createdAt);
+            const from = new Date(filterDateRange.from);
+            from.setHours(0, 0, 0, 0);
+            if (orderDate < from) return false;
+        }
+        if (filterDateRange?.to) {
+            const orderDate = new Date(order.createdAt);
+            const to = new Date(filterDateRange.to);
+            to.setHours(23, 59, 59, 999);
+            if (orderDate > to) return false;
         }
 
-        if (!Array.isArray(orderPoints)) return false;
+        if (!selectAllPickupPoints && selectedPickupPoints.length > 0) {
+            if (!order.pickupPoints) return false;
+            let orderPoints: any[] = order.pickupPoints;
+            if (typeof orderPoints === 'string') {
+                try {
+                    orderPoints = JSON.parse(orderPoints);
+                } catch (e) {
+                    return false;
+                }
+            }
+            if (!Array.isArray(orderPoints)) return false;
+            if (!orderPoints.some((pp: string | number) => selectedPickupPoints.includes(Number(pp)))) return false;
+        }
 
-        return orderPoints.some((pp: string | number) =>
-            selectedPickupPoints.includes(Number(pp))
-        );
+        return true;
     });
 
     // Search filtered orders
@@ -283,7 +286,6 @@ export default function PickingListReport() {
         setIsGenerating(true);
 
         try {
-            const selectedGroup = groups.find(g => g.id === selectedGroupId);
             const payload = {
                 orderIds: selectedOrders,
                 pickupPoints: selectAllPickupPoints ? PICKUP_POINTS.map(p => p.id) : selectedPickupPoints,
@@ -292,19 +294,90 @@ export default function PickingListReport() {
                 groupId: sectionMode === "group" ? selectedGroupId : undefined,
             };
 
-            // TODO: Implement PDF generation endpoint
-            console.log("Generating PDF with payload:", payload);
+            const response = await apiRequest("POST", "/api/reports/picking-list/generate", payload);
+            if (!response.ok) throw new Error("Falha ao gerar relatório");
+            const data = await response.json();
+
+            const selectedGroup = groups.find(g => g.id === selectedGroupId);
+            const sectionLabel = sectionMode === "group" && selectedGroup
+                ? selectedGroup.name
+                : sectionMode === "individual" && selectedSections.length > 0
+                    ? selectedSections.join(", ")
+                    : "Todas";
+
+            const reportOrders = data.orders || [];
+            const now = new Date().toLocaleString("pt-BR");
+
+            let itemsHtml = "";
+            for (const order of reportOrders) {
+                const items = order.items || [];
+                for (const item of items) {
+                    if (selectedSections.length > 0 && !selectedSections.includes(item.section)) continue;
+                    itemsHtml += `<tr>
+                        <td>${order.erpOrderId || ""}</td>
+                        <td>${order.customerName || ""}</td>
+                        <td>${item.product?.erpCode || item.productId || ""}</td>
+                        <td>${item.product?.name || ""}</td>
+                        <td>${item.product?.barcode || ""}</td>
+                        <td>${item.section || ""}</td>
+                        <td style="text-align:center;font-weight:bold">${item.quantity || 0}</td>
+                        <td style="text-align:center">${item.separatedQty || 0}</td>
+                        <td></td>
+                    </tr>`;
+                }
+            }
+
+            const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Romaneio de Separação</title>
+<style>
+    body{font-family:Arial,sans-serif;margin:20px;font-size:11px}
+    h1{font-size:18px;margin-bottom:4px}
+    .info{margin-bottom:12px;color:#555;font-size:10px}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th,td{border:1px solid #999;padding:4px 6px;text-align:left}
+    th{background:#e0e0e0;font-weight:bold;font-size:10px}
+    td{font-size:10px}
+    .footer{margin-top:16px;font-size:9px;color:#888;text-align:center}
+    @media print{body{margin:5mm}h1{font-size:14px}.footer{page-break-after:always}}
+</style></head><body>
+<h1>Romaneio de Separação</h1>
+<div class="info">
+    Gerado em: ${now} | Pedidos: ${reportOrders.length} | Seções: ${sectionLabel}
+</div>
+<table>
+    <thead>
+        <tr>
+            <th>Pedido</th>
+            <th>Cliente</th>
+            <th>Código</th>
+            <th>Produto</th>
+            <th>Cód. Barras</th>
+            <th>Seção</th>
+            <th>Qtd</th>
+            <th>Separado</th>
+            <th>Conf.</th>
+        </tr>
+    </thead>
+    <tbody>${itemsHtml}</tbody>
+</table>
+<div class="footer">GLA WMS - Romaneio de Separação</div>
+</body></html>`;
+
+            const printWindow = window.open("", "_blank");
+            if (printWindow) {
+                printWindow.document.write(html);
+                printWindow.document.close();
+            }
 
             toast({
-                title: "✅ Relatório gerado!",
-                description: "O PDF foi aberto em uma nova aba."
+                title: "Relatório gerado!",
+                description: "O relatório foi aberto em uma nova aba."
             });
 
-            // Reset and return to initial
             handleCancelFlow();
         } catch (error) {
             toast({
-                title: "❌ Erro ao gerar relatório",
+                title: "Erro ao gerar relatório",
                 variant: "destructive",
                 description: "Não foi possível gerar o PDF. Tente novamente."
             });
@@ -548,12 +621,21 @@ export default function PickingListReport() {
                                 <Button
                                     onClick={() => {
                                         setFilterDateRange(tempDateRange);
-                                        refetchOrders();
+                                        if (!ordersLoaded) {
+                                            setOrdersLoaded(true);
+                                        } else {
+                                            refetchOrders();
+                                        }
                                     }}
                                     variant="default"
+                                    disabled={isLoadingOrders}
                                 >
-                                    <SearchIcon className="h-4 w-4 mr-2" />
-                                    Buscar Pedidos
+                                    {isLoadingOrders ? (
+                                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                    ) : (
+                                        <SearchIcon className="h-4 w-4 mr-2" />
+                                    )}
+                                    {isLoadingOrders ? "Carregando..." : "Buscar Pedidos"}
                                 </Button>
                             </div>
 

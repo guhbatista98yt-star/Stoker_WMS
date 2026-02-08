@@ -23,6 +23,11 @@ export type ExceptionType = typeof exceptionTypeEnum[number];
 export const workUnitTypeEnum = ["separacao", "conferencia", "balcao"] as const;
 export type WorkUnitType = typeof workUnitTypeEnum[number];
 
+export interface UserSettings {
+  allowManualQty?: boolean;
+  allowMultiplier?: boolean;
+}
+
 export const users = pgTable("users", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   username: text("username").notNull(),
@@ -30,6 +35,7 @@ export const users = pgTable("users", {
   name: text("name").notNull(),
   role: text("role").notNull().default("separacao").$type<UserRole>(),
   sections: jsonb("sections"),
+  settings: jsonb("settings").$type<UserSettings>().default({}),
   active: boolean("active").notNull().default(true),
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
 });
@@ -202,6 +208,19 @@ export const sessions = pgTable("sessions", {
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
 });
 
+export const manualQtyRuleTypeEnum = ["product_code", "barcode", "description_keyword", "manufacturer"] as const;
+export type ManualQtyRuleType = typeof manualQtyRuleTypeEnum[number];
+
+export const manualQtyRules = pgTable("manual_qty_rules", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  ruleType: text("rule_type").notNull().$type<ManualQtyRuleType>(),
+  value: text("value").notNull(),
+  description: text("description"),
+  active: boolean("active").notNull().default(true),
+  createdBy: text("created_by").references(() => users.id),
+  createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
+});
+
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
 export const insertRouteSchema = createInsertSchema(routes).omit({ id: true }).extend({ code: z.string().optional() });
 export const insertSectionSchema = createInsertSchema(sections);
@@ -212,6 +231,7 @@ export const insertWorkUnitSchema = createInsertSchema(workUnits).omit({ id: tru
 export const insertPickingSessionSchema = createInsertSchema(pickingSessions).omit({ id: true, createdAt: true, lastHeartbeat: true });
 export const insertExceptionSchema = createInsertSchema(exceptions).omit({ id: true, createdAt: true });
 export const insertAuditLogSchema = createInsertSchema(auditLogs).omit({ id: true, createdAt: true });
+export const insertManualQtyRuleSchema = createInsertSchema(manualQtyRules).omit({ id: true, createdAt: true });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
@@ -234,6 +254,8 @@ export type AuditLog = typeof auditLogs.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
 export type SectionGroup = typeof sectionGroups.$inferSelect;
 export type InsertSectionGroup = typeof sectionGroups.$inferInsert;
+export type ManualQtyRule = typeof manualQtyRules.$inferSelect;
+export type InsertManualQtyRule = z.infer<typeof insertManualQtyRuleSchema>;
 
 
 export const loginSchema = z.object({
