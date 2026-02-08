@@ -297,69 +297,149 @@ export default function PickingListReport() {
             if (!response.ok) throw new Error("Falha ao gerar relatório");
             const data = await response.json();
 
-            const selectedGroup = groups.find(g => g.id === selectedGroupId);
-            const sectionLabel = sectionMode === "group" && selectedGroup
-                ? selectedGroup.name
-                : sectionMode === "individual" && selectedSections.length > 0
-                    ? selectedSections.join(", ")
-                    : "Todas";
-
             const reportOrders = data.orders || [];
             const now = new Date().toLocaleString("pt-BR");
 
-            let itemsHtml = "";
+            const usedPickupPoints = selectAllPickupPoints ? pickupPoints : selectedPickupPoints;
+            const ppLabel = usedPickupPoints.length > 0 ? usedPickupPoints.join("; ") : "Todos";
+            const orderIdsLabel = reportOrders.map((o: any) => o.erpOrderId).join("; ");
+
+            const activeSections = sectionMode === "individual" && selectedSections.length > 0
+                ? selectedSections
+                : sectionMode === "group" && selectedGroupId
+                    ? (groups.find(g => g.id === selectedGroupId)?.sections || [])
+                    : [];
+            const sectionFilterLabel = activeSections.length > 0 ? activeSections.join("; ") : "Todos";
+
+            const routeIds = [...new Set(reportOrders.map((o: any) => o.routeId).filter(Boolean))] as string[];
+            const routeNames = routeIds.map((rid: string) => {
+                const r = routes.find((rt: any) => rt.id === rid);
+                return r ? (r.name || r.erpRouteId || rid) : rid;
+            });
+            const titleRouteLabel = routeNames.length > 0 ? routeNames.join(", ") : "";
+            const titlePrefix = titleRouteLabel ? `${titleRouteLabel} - ` : "";
+
+            interface AggregatedProduct {
+                erpCode: string;
+                name: string;
+                barcode: string;
+                manufacturer: string;
+                section: string;
+                totalQty: number;
+            }
+
+            const productMap = new Map<string, AggregatedProduct>();
+
             for (const order of reportOrders) {
                 const items = order.items || [];
                 for (const item of items) {
-                    if (selectedSections.length > 0 && !selectedSections.includes(item.section)) continue;
-                    itemsHtml += `<tr>
-                        <td>${order.erpOrderId || ""}</td>
-                        <td>${order.customerName || ""}</td>
-                        <td>${item.product?.erpCode || item.productId || ""}</td>
-                        <td>${item.product?.name || ""}</td>
-                        <td>${item.product?.barcode || ""}</td>
-                        <td>${item.section || ""}</td>
-                        <td style="text-align:center;font-weight:bold">${item.quantity || 0}</td>
-                        <td style="text-align:center">${item.separatedQty || 0}</td>
-                        <td></td>
-                    </tr>`;
+                    if (activeSections.length > 0 && !activeSections.includes(item.section)) continue;
+
+                    const erpCode = item.product?.erpCode || item.productId || "";
+                    const section = item.section || "";
+                    const key = `${section}::${erpCode}`;
+
+                    const existing = productMap.get(key);
+                    if (existing) {
+                        existing.totalQty += Number(item.quantity) || 0;
+                    } else {
+                        productMap.set(key, {
+                            erpCode,
+                            name: item.product?.name || "",
+                            barcode: item.product?.barcode || "",
+                            manufacturer: item.product?.manufacturer || "",
+                            section,
+                            totalQty: Number(item.quantity) || 0,
+                        });
+                    }
                 }
             }
 
+            const allProducts = Array.from(productMap.values());
+            const sectionGroups = new Map<string, AggregatedProduct[]>();
+            for (const p of allProducts) {
+                const sectionName = p.section || "Sem Seção";
+                if (!sectionGroups.has(sectionName)) {
+                    sectionGroups.set(sectionName, []);
+                }
+                sectionGroups.get(sectionName)!.push(p);
+            }
+
+            let bodyHtml = "";
+            let grandTotal = 0;
+
+            const sortedSections = Array.from(sectionGroups.keys()).sort();
+            for (const sectionName of sortedSections) {
+                const items = sectionGroups.get(sectionName)!.sort((a, b) => a.erpCode.localeCompare(b.erpCode));
+                bodyHtml += `<tr class="section-row"><td colspan="6"><strong>Seção: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;${sectionName.toUpperCase()}</strong></td></tr>`;
+
+                for (const item of items) {
+                    const qtyFormatted = item.totalQty % 1 === 0 ? item.totalQty.toFixed(0) + ",00" : item.totalQty.toFixed(2).replace(".", ",");
+                    bodyHtml += `<tr>
+                        <td>${item.erpCode}</td>
+                        <td>${item.name}</td>
+                        <td>${item.barcode}</td>
+                        <td></td>
+                        <td>${item.manufacturer}</td>
+                        <td style="text-align:right">${qtyFormatted}</td>
+                    </tr>`;
+                }
+
+                bodyHtml += `<tr class="count-row"><td colspan="6"><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;${items.length}</strong></td></tr>`;
+                grandTotal += items.length;
+            }
+
+            bodyHtml += `<tr class="total-row"><td colspan="6"><strong>Total</strong></td></tr>`;
+            bodyHtml += `<tr class="total-row"><td colspan="6"><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<u>${grandTotal}</u></strong></td></tr>`;
+
             const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Romaneio de Separação</title>
+<html><head><meta charset="utf-8"><title>${titlePrefix}Romaneio de Separação</title>
 <style>
-    body{font-family:Arial,sans-serif;margin:20px;font-size:11px}
-    h1{font-size:18px;margin-bottom:4px}
-    .info{margin-bottom:12px;color:#555;font-size:10px}
-    table{width:100%;border-collapse:collapse;margin-top:8px}
-    th,td{border:1px solid #999;padding:4px 6px;text-align:left}
-    th{background:#e0e0e0;font-weight:bold;font-size:10px}
-    td{font-size:10px}
-    .footer{margin-top:16px;font-size:9px;color:#888;text-align:center}
-    @media print{body{margin:5mm}h1{font-size:14px}.footer{page-break-after:always}}
+    body { font-family: Arial, sans-serif; margin: 15px 20px; font-size: 10px; color: #000; }
+    .header { text-align: center; margin-bottom: 6px; }
+    .header h1 { font-size: 16px; font-weight: bold; margin: 0 0 6px 0; }
+    .header .params { font-size: 9px; color: #333; line-height: 1.5; }
+    .sub-header { display: flex; justify-content: space-between; border-bottom: 1px solid #000; padding-bottom: 2px; margin-bottom: 4px; font-size: 9px; }
+    .sub-header .left { font-style: italic; text-decoration: underline; }
+    .sub-header .right { text-align: right; }
+    table { width: 100%; border-collapse: collapse; }
+    th { border-top: 1px solid #000; border-bottom: 1px solid #000; padding: 3px 5px; text-align: left; font-size: 9px; font-weight: bold; }
+    th:last-child { text-align: right; }
+    td { padding: 2px 5px; font-size: 9px; border: none; }
+    td:last-child { text-align: right; }
+    .section-row td { padding-top: 8px; padding-bottom: 2px; border: none; font-size: 9px; }
+    .count-row td { padding-top: 2px; border: none; font-size: 9px; }
+    .total-row td { padding-top: 2px; border: none; font-size: 9px; }
+    @media print {
+        body { margin: 5mm; }
+        @page { size: landscape; margin: 5mm; }
+    }
 </style></head><body>
-<h1>Romaneio de Separação</h1>
-<div class="info">
-    Gerado em: ${now} | Pedidos: ${reportOrders.length} | Seções: ${sectionLabel}
+<div class="header">
+    <h1>${titlePrefix}Romaneio de Separação</h1>
+    <div class="params">
+        Informe o Ponto de Retirada::&nbsp; Multi-valor ${ppLabel}<br/>
+        Informe os Pedidos::&nbsp; Multi-valor ${orderIdsLabel}<br/>
+        Informe o Local de Estoque::&nbsp; Multi-valor ${sectionFilterLabel}
+    </div>
+</div>
+<div class="sub-header">
+    <span class="left">Logística/Movimento de Entrega</span>
+    <span class="right">Versão 1<br/>${now}</span>
 </div>
 <table>
     <thead>
         <tr>
-            <th>Pedido</th>
-            <th>Cliente</th>
-            <th>Código</th>
-            <th>Produto</th>
-            <th>Cód. Barras</th>
-            <th>Seção</th>
-            <th>Qtd</th>
-            <th>Separado</th>
-            <th>Conf.</th>
+            <th>Cód. Produto</th>
+            <th>Descrição do Produto</th>
+            <th>Cód. de Barras</th>
+            <th>Lote</th>
+            <th>Fornecedor</th>
+            <th>Separar</th>
         </tr>
     </thead>
-    <tbody>${itemsHtml}</tbody>
+    <tbody>${bodyHtml}</tbody>
 </table>
-<div class="footer">GLA WMS - Romaneio de Separação</div>
 </body></html>`;
 
             const printWindow = window.open("", "_blank");
