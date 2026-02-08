@@ -44,12 +44,6 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { Link } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 
-const PICKUP_POINTS = [
-    { id: 52, label: "003 - BALCAO 03" },
-    { id: 61, label: "003 - ENTREGA - SEPARAÇÃO" },
-    { id: 60, label: "003 - ENTREGA EXTERNO - SEPARAÇÃO" },
-    { id: 54, label: "003 - RETIRADA LOJA 03" },
-];
 
 type FlowStep = "initial" | "pickup-points" | "select-orders" | "sections" | "summary";
 type SectionMode = "individual" | "group";
@@ -95,6 +89,11 @@ export default function PickingListReport() {
     const [isGenerating, setIsGenerating] = useState(false);
 
     const [ordersLoaded, setOrdersLoaded] = useState(false);
+
+    const { data: pickupPointsData } = useQuery({
+        queryKey: ["/api/pickup-points"],
+    });
+    const pickupPoints: number[] = (pickupPointsData as number[]) || [];
 
     const { data: ordersData, refetch: refetchOrders, isFetching: isLoadingOrders } = useQuery({
         queryKey: ["/api/orders"],
@@ -288,7 +287,7 @@ export default function PickingListReport() {
         try {
             const payload = {
                 orderIds: selectedOrders,
-                pickupPoints: selectAllPickupPoints ? PICKUP_POINTS.map(p => p.id) : selectedPickupPoints,
+                pickupPoints: selectAllPickupPoints ? pickupPoints : selectedPickupPoints,
                 mode: sectionMode,
                 sections: sectionMode === "individual" ? selectedSections : undefined,
                 groupId: sectionMode === "group" ? selectedGroupId : undefined,
@@ -571,16 +570,19 @@ export default function PickingListReport() {
                             </div>
 
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                {PICKUP_POINTS.map(point => (
-                                    <div key={point.id} className="flex items-center space-x-2 p-3 border rounded hover:bg-muted/50 transition-colors">
+                                {pickupPoints.length === 0 && (
+                                    <p className="text-muted-foreground text-sm col-span-2">Nenhum ponto de retirada encontrado</p>
+                                )}
+                                {pickupPoints.map(pointId => (
+                                    <div key={pointId} className="flex items-center space-x-2 p-3 border rounded hover:bg-muted/50 transition-colors">
                                         <Checkbox
-                                            id={`point-${point.id}`}
-                                            checked={selectedPickupPoints.includes(point.id)}
-                                            onCheckedChange={() => togglePickupPoint(point.id)}
+                                            id={`point-${pointId}`}
+                                            checked={selectedPickupPoints.includes(pointId)}
+                                            onCheckedChange={() => togglePickupPoint(pointId)}
                                             disabled={selectAllPickupPoints}
                                         />
-                                        <Label htmlFor={`point-${point.id}`} className="cursor-pointer font-medium text-sm w-full py-1">
-                                            {point.label}
+                                        <Label htmlFor={`point-${pointId}`} className="cursor-pointer font-medium text-sm w-full py-1">
+                                            Ponto {pointId}
                                         </Label>
                                     </div>
                                 ))}
