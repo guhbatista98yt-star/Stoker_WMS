@@ -16,6 +16,7 @@ import RoutesPage from "@/pages/supervisor/routes";
 import RouteOrdersPage from "@/pages/supervisor/route-orders";
 import ReportsPage from "@/pages/supervisor/reports";
 import PickingListReportPage from "@/pages/supervisor/reports/picking-list";
+import MappingStudioPage from "@/pages/supervisor/mapping-studio";
 import SeparacaoPage from "@/pages/separacao/index";
 import ConferenciaPage from "@/pages/conferencia/index";
 import BalcaoPage from "@/pages/balcao/index";
@@ -132,6 +133,12 @@ function Router() {
       <Route path="/supervisor/reports/picking-list">
         <ProtectedRoute allowedRoles={["supervisor"]}>
           <PickingListReportPage />
+        </ProtectedRoute>
+      </Route>
+
+      <Route path="/supervisor/mapping-studio">
+        <ProtectedRoute allowedRoles={["supervisor"]}>
+          <MappingStudioPage />
         </ProtectedRoute>
       </Route>
 

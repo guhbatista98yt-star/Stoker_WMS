@@ -3,12 +3,13 @@ import { createServer, type Server } from "http";
 import cookieParser from "cookie-parser";
 import { storage } from "./storage";
 import { hashPassword, verifyPassword, createAuthSession, isAuthenticated, requireRole, getTokenFromRequest, getUserFromToken } from "./auth";
-import { loginSchema, insertRouteSchema, orderItems, pickingSessions } from "@shared/schema";
+import { loginSchema, insertRouteSchema, orderItems, pickingSessions, type MappingField, datasetEnum } from "@shared/schema";
 import { z } from "zod";
 import { exec } from "child_process";
 import path from "path";
 import { setupSSE, broadcastSSE } from "./sse";
 import { db } from "./db";
+import { getDataContract, getAvailableDatasets } from "./data-contracts";
 
 const LOCK_TTL_MINUTES = 15;
 
@@ -1295,6 +1296,244 @@ export async function registerRoutes(
       res.json({ success: true });
     } catch (error) {
       console.error("Clear exceptions error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  // ==================== Mapping Studio ====================
+
+  app.get("/api/datasets", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      res.json(getAvailableDatasets());
+    } catch (error) {
+      console.error("Get datasets error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.get("/api/schema/:dataset", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      const dataset = req.params.dataset as string;
+      const contract = getDataContract(dataset);
+      if (!contract) {
+        return res.status(404).json({ error: "Dataset não encontrado" });
+      }
+      res.json({ dataset, fields: contract });
+    } catch (error) {
+      console.error("Get schema error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.get("/api/mapping/:dataset", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      const dataset = req.params.dataset as string;
+      const mapping = await storage.getMappingByDataset(dataset);
+      res.json(mapping || null);
+    } catch (error) {
+      console.error("Get mapping error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.get("/api/mappings", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      const mappings = await storage.getAllMappings();
+      res.json(mappings);
+    } catch (error) {
+      console.error("Get all mappings error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.post("/api/mapping/:dataset", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      const dataset = req.params.dataset as string;
+      const contract = getDataContract(dataset);
+      if (!contract) {
+        return res.status(404).json({ error: "Dataset não encontrado" });
+      }
+
+      const { mappingJson, description } = req.body;
+      if (!mappingJson || !Array.isArray(mappingJson)) {
+        return res.status(400).json({ error: "mappingJson é obrigatório e deve ser um array" });
+      }
+
+      const errors: string[] = [];
+      for (const field of contract) {
+        if (field.required) {
+          const mapped = mappingJson.find((m: MappingField) => m.appField === field.appField);
+          if (!mapped || (!mapped.dbExpression && !mapped.defaultValue)) {
+            errors.push(`Campo obrigatório '${field.appField}' precisa de uma expressão DB2 ou valor padrão`);
+          }
+        }
+      }
+
+      if (errors.length > 0) {
+        return res.status(400).json({ error: "Validação falhou", details: errors });
+      }
+
+      const userId = (req as any).user.id;
+      const mapping = await storage.saveMapping(dataset, mappingJson, description || null, userId);
+
+      await storage.createAuditLog({
+        userId,
+        action: "save_mapping",
+        entityType: "db2_mapping",
+        entityId: mapping.id,
+        details: `Mapping v${mapping.version} salvo para dataset '${dataset}'`,
+        ipAddress: getClientIp(req),
+        userAgent: getUserAgent(req),
+      });
+
+      res.json(mapping);
+    } catch (error) {
+      console.error("Save mapping error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.post("/api/mapping/:id/activate", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      const id = req.params.id as string;
+      const mapping = await storage.activateMapping(id);
+      if (!mapping) {
+        return res.status(404).json({ error: "Mapping não encontrado" });
+      }
+
+      const userId = (req as any).user.id;
+      await storage.createAuditLog({
+        userId,
+        action: "activate_mapping",
+        entityType: "db2_mapping",
+        entityId: id as string,
+        details: `Mapping v${mapping.version} ativado para dataset '${mapping.dataset}'`,
+        ipAddress: getClientIp(req),
+        userAgent: getUserAgent(req),
+      });
+
+      res.json(mapping);
+    } catch (error) {
+      console.error("Activate mapping error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.post("/api/preview/:dataset", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      const dataset = req.params.dataset as string;
+      const contract = getDataContract(dataset);
+      if (!contract) {
+        return res.status(404).json({ error: "Dataset não encontrado" });
+      }
+
+      const { mappingJson } = req.body;
+      if (!mappingJson || !Array.isArray(mappingJson)) {
+        return res.status(400).json({ error: "mappingJson é obrigatório" });
+      }
+
+      const cachedRows = await storage.getCacheOrcamentosPreview(20);
+
+      if (cachedRows.length === 0) {
+        return res.json({
+          preview: [],
+          warnings: ["Nenhum dado no cache. Execute a sincronização DB2 primeiro."],
+          errors: [],
+        });
+      }
+
+      const preview: any[] = [];
+      const errors: string[] = [];
+      const warnings: string[] = [];
+
+      const requiredFields = contract.filter(f => f.required).map(f => f.appField);
+      const mappedRequiredFields = mappingJson
+        .filter((m: MappingField) => requiredFields.includes(m.appField) && (m.dbExpression || m.defaultValue))
+        .map((m: MappingField) => m.appField);
+
+      for (const reqField of requiredFields) {
+        if (!mappedRequiredFields.includes(reqField)) {
+          errors.push(`Campo obrigatório '${reqField}' não mapeado`);
+        }
+      }
+
+      for (const row of cachedRows) {
+        const transformed: Record<string, any> = {};
+        const rowObj = row as Record<string, any>;
+
+        for (const mapping of mappingJson as MappingField[]) {
+          const { appField, dbExpression, cast, defaultValue, type } = mapping;
+
+          let value: any = null;
+
+          if (dbExpression) {
+            const colName = dbExpression.trim();
+            const upperCol = colName.toUpperCase();
+            const matchingKey = Object.keys(rowObj).find(k => k.toUpperCase() === upperCol);
+            if (matchingKey) {
+              value = rowObj[matchingKey];
+            } else {
+              const camelKey = Object.keys(rowObj).find(k => {
+                const snake = k.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '');
+                return snake.toUpperCase() === upperCol || k.toUpperCase() === upperCol;
+              });
+              if (camelKey) {
+                value = rowObj[camelKey];
+              }
+            }
+          }
+
+          if (value === null || value === undefined || value === '') {
+            value = defaultValue || null;
+          }
+
+          if (value !== null && cast) {
+            switch (cast) {
+              case "number":
+                value = Number(value);
+                break;
+              case "string":
+                value = String(value);
+                break;
+              case "divide_100":
+                value = Number(value) / 100;
+                break;
+              case "divide_1000":
+                value = Number(value) / 1000;
+                break;
+              case "boolean_T_F":
+                value = value === "T" || value === "t";
+                break;
+            }
+          }
+
+          transformed[appField] = value;
+        }
+
+        preview.push(transformed);
+      }
+
+      res.json({ preview, errors, warnings });
+    } catch (error) {
+      console.error("Preview error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.get("/api/cache-columns", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      const cachedRows = await storage.getCacheOrcamentosPreview(1);
+      if (cachedRows.length === 0) {
+        return res.json({ columns: [], message: "Nenhum dado no cache. Execute a sincronização DB2 primeiro." });
+      }
+      const row = cachedRows[0] as Record<string, any>;
+      const columns = Object.keys(row).map(key => ({
+        name: key,
+        sampleValue: row[key],
+      }));
+      res.json({ columns });
+    } catch (error) {
+      console.error("Get cache columns error:", error);
       res.status(500).json({ error: "Erro interno" });
     }
   });

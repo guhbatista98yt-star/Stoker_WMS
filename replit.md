@@ -67,6 +67,7 @@ Preferred communication style: Simple, everyday language.
 - `routes` — Delivery routes
 - `sections` — Warehouse sections (numbered, named)
 - `section_groups` — Groups of sections for operator assignment
+- `db2_mappings` — DB2-to-app field mapping configurations with versioning and active status
 - `exceptions` — Exception records (damaged, missing, expired items)
 - `audit_logs` — Full audit trail of system actions
 - `sessions` — Auth sessions with tokens, session keys, and expiration
@@ -93,6 +94,19 @@ Preferred communication style: Simple, everyday language.
 - Can run in loop mode (periodic sync) or one-shot mode
 - Triggered manually via `/api/sync` endpoint (authenticated)
 - Historical staging concept: ERP data flows into a cache table, then gets processed into operational tables
+- Supports dynamic field mapping: when active mappings exist in `db2_mappings` table, sync uses them instead of hardcoded column references
+- Falls back to legacy hardcoded mapping when no active mapping is found
+
+### Mapping Studio
+- Visual interface for mapping DB2 columns to application fields without code editing
+- Accessible from supervisor dashboard at `/supervisor/mapping-studio`
+- Supports 3 datasets: orders, products, order_items (work_units are derived automatically)
+- Data contracts define the fields each dataset expects (appField, type, required, description, example)
+- Mappings are versioned and can be activated/deactivated
+- Preview/Test feature applies mapping to cached DB2 data and shows 20 transformed rows
+- Cast options: string, number, divide_100, divide_1000, boolean_T_F
+- API endpoints: GET/POST `/api/mapping/:dataset`, GET `/api/schema/:dataset`, POST `/api/preview/:dataset`
+- Server file: `server/data-contracts.ts` defines field inventories per dataset
 
 ### Build & Development
 - **Dev**: `npm run dev` → runs `tsx server/index.ts` with Vite middleware for HMR

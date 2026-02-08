@@ -30,6 +30,14 @@ except ImportError:
     pyodbc = None
 # =====================================
 
+# === PostgreSQL mapping support ===
+try:
+    import psycopg2
+    import json as json_module
+except ImportError:
+    psycopg2 = None
+# ==================================
+
 # === CONFIGURAÇÃO ===
 STRING_CONEXAO_DB2 = (
     "DSN=CISSODBC;UID=CONSULTA;PWD=qazwsx@123;"
@@ -657,6 +665,80 @@ def sync_orcamentos(conn_db2, conn_sqlite: sqlite3.Connection):
 
 import uuid
 
+def load_pg_mappings(dataset: str) -> Optional[list]:
+    """Carrega mapeamento ativo do PostgreSQL para o dataset especificado."""
+    if not psycopg2:
+        log("psycopg2 nao instalado - usando mapeamento legado")
+        return None
+    
+    pg_url = os.environ.get('DATABASE_URL')
+    if not pg_url:
+        log("DATABASE_URL nao configurada - usando mapeamento legado")
+        return None
+    
+    try:
+        conn_pg = psycopg2.connect(pg_url)
+        cursor = conn_pg.cursor()
+        cursor.execute(
+            "SELECT mapping_json FROM db2_mappings WHERE dataset = %s AND is_active = true ORDER BY version DESC LIMIT 1",
+            (dataset,)
+        )
+        row = cursor.fetchone()
+        conn_pg.close()
+        
+        if row:
+            mapping = row[0]
+            if isinstance(mapping, str):
+                mapping = json_module.loads(mapping)
+            log(f"  Mapping ativo encontrado para '{dataset}' ({len(mapping)} campos)")
+            return mapping
+        else:
+            log(f"  Nenhum mapping ativo para '{dataset}' - usando mapeamento legado")
+            return None
+    except Exception as e:
+        log(f"  Erro ao carregar mapping do PostgreSQL: {e}")
+        return None
+
+
+def apply_mapping(row: dict, mapping: list) -> dict:
+    """Aplica um mapeamento a uma linha de dados do cache."""
+    result = {}
+    for field_map in mapping:
+        app_field = field_map.get('appField', '')
+        db_expr = field_map.get('dbExpression', '')
+        cast = field_map.get('cast', '')
+        default = field_map.get('defaultValue', '')
+        
+        value = None
+        if db_expr:
+            value = row.get(db_expr)
+            if value is None:
+                value = row.get(db_expr.upper())
+            if value is None:
+                value = row.get(db_expr.lower())
+        
+        if value is None or value == '':
+            value = default if default else None
+        
+        if value is not None and cast:
+            try:
+                if cast == 'number':
+                    value = float(value)
+                elif cast == 'string':
+                    value = str(value)
+                elif cast == 'divide_100':
+                    value = float(value) / 100.0
+                elif cast == 'divide_1000':
+                    value = float(value) / 1000.0
+                elif cast == 'boolean_T_F':
+                    value = (str(value).upper() == 'T')
+            except (ValueError, TypeError):
+                pass
+        
+        result[app_field] = value
+    return result
+
+
 def transform_data(conn_sqlite: sqlite3.Connection):
     """
     Transforma dados brutos de cache_orcamentos em orders/products/work_units
@@ -665,6 +747,17 @@ def transform_data(conn_sqlite: sqlite3.Connection):
     log("=" * 60)
     log("TRANSFORMANDO DADOS PARA APLICAÇÃO (OTIMIZADO)")
     log("=" * 60)
+    
+    # Carregar mapeamentos do PostgreSQL (se disponiveis)
+    orders_mapping = load_pg_mappings("orders")
+    products_mapping = load_pg_mappings("products")
+    items_mapping = load_pg_mappings("order_items")
+    
+    use_dynamic_mapping = (orders_mapping is not None or products_mapping is not None or items_mapping is not None)
+    if use_dynamic_mapping:
+        log("  Usando mapeamento dinamico do Mapping Studio")
+    else:
+        log("  Usando mapeamento legado (hardcoded)")
     
     cursor = conn_sqlite.cursor()
     
@@ -711,40 +804,53 @@ def transform_data(conn_sqlite: sqlite3.Connection):
     for row_tuple in rows:
         row = dict(zip(col_names, row_tuple))
         
-        id_empresa = str(row.get('IDEMPRESA'))
-        id_orcamento = str(row.get('IDORCAMENTO'))
-        
-        # FIX: Use only IDORCAMENTO for ID, removing company prefix
-        # We still construct a unique key for memory map if needed, but for DB insertion we want simple ID.
-        # But wait, if we have multiple companies, IDORCAMENTO might collide? 
-        # User requested "3-" removal. Assuming IDORCAMENTO is unique enough or we only filter Company 3.
-        # Let's use simple ID for display but keep internal uniqueness if possible?
-        # Actually, user wants "somente o ID do pedido".
-        erp_order_id = id_orcamento 
-        
-        # Internal unique key for map (in case of collision across companies, though we filter company 3)
-        map_key = f"{id_empresa}-{id_orcamento}"
-        
-        if map_key not in orders_map:
-            orders_map[map_key] = {
-                'erp_id_display': erp_order_id, # Store for insertion
-                'customer_name': row.get('DESCLIENTE') or 'Cliente Desconhecido',
-                'customer_code': str(row.get('IDCLIFOR') or ''),
-                'total_value': 0.0,
-                'items': [],
-                'created_at': row.get('DTMOVIMENTO'),
-                'pickup_point': row.get('IDLOCALRETIRADA'), # Capture for WO
-                'section': row.get('IDSECAO'), # Capture for WO
-                'flag_pre_nota_paga': row.get('FLAGPRENOTAPAGA')
-            }
-        
-        # FIX: Value is 100x too high (e.g. 22680.00 instead of 226.80)
-        # Assuming DB2 stores as generic float but logic was off? Or it's integer cents?
-        # User said "reas". If 22680 comes in, it should be 226.80. So divide by 100.
-        val_liq = float(row.get('VALTOTLIQUIDO') or 0) / 100.0
-        
-        orders_map[map_key]['total_value'] += val_liq
-        orders_map[map_key]['items'].append(row)
+        # Use dynamic mapping if available, otherwise use legacy hardcoded mapping
+        if orders_mapping:
+            mapped_order = apply_mapping(row, orders_mapping)
+            id_empresa = str(row.get('IDEMPRESA', ''))
+            erp_order_id = str(mapped_order.get('erp_order_id', ''))
+            map_key = f"{id_empresa}-{erp_order_id}"
+            
+            if map_key not in orders_map:
+                orders_map[map_key] = {
+                    'erp_id_display': erp_order_id,
+                    'customer_name': mapped_order.get('customer_name') or 'Cliente Desconhecido',
+                    'customer_code': str(mapped_order.get('customer_code') or ''),
+                    'total_value': 0.0,
+                    'items': [],
+                    'created_at': mapped_order.get('created_at'),
+                    'pickup_point': mapped_order.get('pickup_point'),
+                    'section': mapped_order.get('section'),
+                    'flag_pre_nota_paga': None,  # Handled by financial_status mapping
+                    'financial_status': mapped_order.get('financial_status'),
+                }
+            
+            val_liq = float(mapped_order.get('total_value') or 0)
+            orders_map[map_key]['total_value'] += val_liq
+            orders_map[map_key]['items'].append(row)
+        else:
+            # Legacy hardcoded mapping
+            id_empresa = str(row.get('IDEMPRESA'))
+            id_orcamento = str(row.get('IDORCAMENTO'))
+            erp_order_id = id_orcamento
+            map_key = f"{id_empresa}-{id_orcamento}"
+            
+            if map_key not in orders_map:
+                orders_map[map_key] = {
+                    'erp_id_display': erp_order_id,
+                    'customer_name': row.get('DESCLIENTE') or 'Cliente Desconhecido',
+                    'customer_code': str(row.get('IDCLIFOR') or ''),
+                    'total_value': 0.0,
+                    'items': [],
+                    'created_at': row.get('DTMOVIMENTO'),
+                    'pickup_point': row.get('IDLOCALRETIRADA'),
+                    'section': row.get('IDSECAO'),
+                    'flag_pre_nota_paga': row.get('FLAGPRENOTAPAGA')
+                }
+            
+            val_liq = float(row.get('VALTOTLIQUIDO') or 0) / 100.0
+            orders_map[map_key]['total_value'] += val_liq
+            orders_map[map_key]['items'].append(row)
 
     # Pass 2: Process Aggregated Orders
     for map_key, data in orders_map.items():
@@ -761,8 +867,12 @@ def transform_data(conn_sqlite: sqlite3.Connection):
             existing_orders[erp_order_id] = order_uuid # Add to separate lookups if needed later?
             
         # Map Financial Status
-        # FLAGPRENOTAPAGA: 'T' -> 'faturado', 'F' -> 'pendente'
-        fin_status = 'faturado' if data.get('flag_pre_nota_paga') == 'T' else 'pendente'
+        if data.get('financial_status'):
+            fin_status = data['financial_status']
+        elif data.get('flag_pre_nota_paga') == 'T':
+            fin_status = 'faturado'
+        else:
+            fin_status = 'pendente'
 
         # Always add to upsert list (Update existing ones too)
         upsert_orders.append((
@@ -779,40 +889,64 @@ def transform_data(conn_sqlite: sqlite3.Connection):
              
         # --- ITEMS ---
         for item in data['items']:
-            erp_prod_code = str(item.get('IDPRODUTO'))
-            
-            # Product UUID
-            prod_uuid = existing_products.get(erp_prod_code)
-            
-            # Use Fetched Unit
-            unit = item.get('UNIDADE') or 'UN'
-            manufacturer = item.get('FABRICANTE') or ''
-            
-            # FIX: Quantity logic (Divide by 1000)
-            raw_qty = float(item.get('QTDPRODUTO') or 0)
-            real_qty = raw_qty / 1000.0
-
-            if not prod_uuid:
-                # Check batch
-                prod_uuid = batch_products_map.get(erp_prod_code)
+            if products_mapping and items_mapping:
+                mapped_prod = apply_mapping(item, products_mapping)
+                mapped_item = apply_mapping(item, items_mapping)
+                erp_prod_code = str(mapped_prod.get('erp_code') or mapped_item.get('erp_product_code') or '')
+                prod_uuid = existing_products.get(erp_prod_code)
+                unit = str(mapped_prod.get('unit') or 'UN')
+                manufacturer = str(mapped_prod.get('manufacturer') or '')
+                real_qty = float(mapped_item.get('quantity') or 0)
+                
                 if not prod_uuid:
-                    prod_uuid = str(uuid.uuid4())
-                    new_products.append((
-                        prod_uuid, erp_prod_code, item.get('CODBARRAS'), item.get('CODBARRAS_CAIXA'), item.get('DESCRRESPRODUTO'), 
-                        str(item.get('IDSECAO')), item.get('IDLOCALRETIRADA'),
-                        unit, 
-                        manufacturer,
-                        item.get('VALUNITBRUTO')
-                    ))
-                    batch_products_map[erp_prod_code] = prod_uuid
+                    prod_uuid = batch_products_map.get(erp_prod_code)
+                    if not prod_uuid:
+                        prod_uuid = str(uuid.uuid4())
+                        new_products.append((
+                            prod_uuid, erp_prod_code,
+                            mapped_prod.get('barcode'), mapped_prod.get('box_barcode'),
+                            mapped_prod.get('name'),
+                            str(mapped_prod.get('section') or ''), mapped_prod.get('pickup_point'),
+                            unit, manufacturer,
+                            mapped_prod.get('price')
+                        ))
+                        batch_products_map[erp_prod_code] = prod_uuid
+            else:
+                # Legacy hardcoded mapping
+                erp_prod_code = str(item.get('IDPRODUTO'))
+                prod_uuid = existing_products.get(erp_prod_code)
+                unit = item.get('UNIDADE') or 'UN'
+                manufacturer = item.get('FABRICANTE') or ''
+                raw_qty = float(item.get('QTDPRODUTO') or 0)
+                real_qty = raw_qty / 1000.0
+                
+                if not prod_uuid:
+                    prod_uuid = batch_products_map.get(erp_prod_code)
+                    if not prod_uuid:
+                        prod_uuid = str(uuid.uuid4())
+                        new_products.append((
+                            prod_uuid, erp_prod_code, item.get('CODBARRAS'), item.get('CODBARRAS_CAIXA'), item.get('DESCRRESPRODUTO'), 
+                            str(item.get('IDSECAO')), item.get('IDLOCALRETIRADA'),
+                            unit, 
+                            manufacturer,
+                            item.get('VALUNITBRUTO')
+                        ))
+                        batch_products_map[erp_prod_code] = prod_uuid
             
             # Item Relation
             if (order_uuid, prod_uuid) not in existing_items:
+                if items_mapping:
+                    mapped_item_data = apply_mapping(item, items_mapping)
+                    item_pickup = mapped_item_data.get('pickup_point')
+                    item_section = str(mapped_item_data.get('section') or '')
+                else:
+                    item_pickup = item.get('IDLOCALRETIRADA')
+                    item_section = str(item.get('IDSECAO'))
                 new_items.append((
-                    str(uuid.uuid4()), order_uuid, prod_uuid, real_qty, # Use real_qty
-                    item.get('IDLOCALRETIRADA'), str(item.get('IDSECAO'))
+                    str(uuid.uuid4()), order_uuid, prod_uuid, real_qty,
+                    item_pickup, item_section
                 ))
-                existing_items.add((order_uuid, prod_uuid)) # Prevent dupes within batch if source has dupes
+                existing_items.add((order_uuid, prod_uuid))
                 
     # 3. Bulk Inserts
     try:
