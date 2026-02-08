@@ -27,7 +27,7 @@ import { Loader2 } from "lucide-react";
 
 function LoadingScreen() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[hsl(215,35%,18%)] via-[hsl(220,40%,28%)] to-[hsl(225,45%,35%)]">
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[hsl(213,67%,22%)] via-[hsl(207,62%,35%)] to-[hsl(157,50%,28%)]">
       <div className="flex flex-col items-center gap-4">
         <Loader2 className="h-10 w-10 text-white animate-spin" />
         <p className="text-white/80">Carregando...</p>

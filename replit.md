@@ -1,14 +1,20 @@
-# GLA Stock - Warehouse Management System
+# Stokar — Warehouse Management System
 
 ## Overview
 
-GLA Stock (formerly GLA WMS) is a warehouse management system designed for logistics operations in Brazil. It manages the full lifecycle of warehouse order fulfillment — from order entry via ERP synchronization through picking (separação), verification (conferência), and counter service (balcão) workflows. The system is optimized for handheld Zebra TC21 collector devices with compact, touch-friendly UIs.
+Stokar (formerly GLA Stock / GLA WMS) is a warehouse management system designed for logistics operations in Brazil, created by **Gusttavo Batista**. It manages the full lifecycle of warehouse order fulfillment — from order entry via ERP synchronization through picking (separação), verification (conferência), and counter service (balcão) workflows. The system is optimized for handheld Zebra TC21 collector devices with compact, touch-friendly UIs.
 
 The system uses a work unit model where atomic tasks are assigned to operators with a locking mechanism (TTL + heartbeat) to prevent concurrent conflicts. Orders flow through defined status states: `pendente` → `em_separacao` → `separado` → `em_conferencia` → `conferido` → `finalizado`. Role-based access control ensures supervisors, pickers, verifiers, and counter attendants each see only their relevant interfaces.
 
+### Brand Colors (Stokar Palette)
+- **Dark Blue**: hsl(213, 67%, 32%) — Primary brand color
+- **Light Blue**: hsl(207, 62%, 50%) — Secondary blue
+- **Teal Green**: hsl(157, 50%, 36%) — Success/accent color
+- **Lime Green**: hsl(82, 56%, 45%) — Chart accent
+
 ### Module Color Themes
-- **Separação**: Blue theme (hsl 210) — `data-module="separacao"`
-- **Conferência**: Teal theme (hsl 168) — `data-module="conferencia"`
+- **Separação**: Blue theme (hsl 207) — `data-module="separacao"`
+- **Conferência**: Teal theme (hsl 157) — `data-module="conferencia"`
 - **Balcão**: Amber theme (hsl 30) — `data-module="balcao"`
 
 ### Module Workflow Patterns
@@ -94,9 +100,13 @@ Preferred communication style: Simple, everyday language.
 - JWT-style tokens stored in HttpOnly cookies (cookie name: `authToken`)
 - bcrypt for password hashing (cost factor 10)
 - Session table with unique session keys for cache invalidation on logout
-- 24-hour token expiry
+- 12-hour token expiry (server-side)
+- Session cookie (no maxAge) — deleted when browser is closed
+- Client-side inactivity timeout: auto-logout after 2 hours of no user interaction
+- Logout deletes session from database to prevent stale token reuse
+- Login clears all previous session data (query cache, localStorage) to prevent cross-user contamination
 - RBAC middleware: `isAuthenticated`, `requireRole` protect API routes
-- Five roles: `administrador` (full access to all modules), `supervisor` (management access), `separacao` (picking), `conferencia` (verification), `balcao` (counter)
+- Six roles: `administrador` (full access to all modules), `supervisor` (management access), `separacao` (picking), `conferencia` (verification), `balcao` (counter), `fila_pedidos` (order queue monitoring)
 
 ### Work Unit & Locking System
 - Work units are atomic tasks derived from orders (one per section/pickup-point combination)

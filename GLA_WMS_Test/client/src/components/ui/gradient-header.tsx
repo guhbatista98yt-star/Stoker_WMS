@@ -12,7 +12,7 @@ export function GradientHeader({ title, subtitle, children, className }: Gradien
   return (
     <div
       className={cn(
-        "bg-gradient-to-r from-[hsl(215,35%,22%)] via-[hsl(220,40%,32%)] to-[hsl(225,45%,38%)]",
+        "bg-gradient-to-r from-[hsl(213,67%,25%)] via-[hsl(207,62%,38%)] to-[hsl(157,50%,30%)]",
         "px-4 py-6 md:px-6 md:py-8 text-white",
         className
       )}
