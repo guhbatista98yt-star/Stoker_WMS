@@ -1,10 +1,26 @@
-# GLA WMS - Warehouse Management System
+# GLA Stock - Warehouse Management System
 
 ## Overview
 
-GLA WMS is a warehouse management system designed for logistics operations in Brazil. It manages the full lifecycle of warehouse order fulfillment — from order entry via ERP synchronization through picking (separação), verification (conferência), and counter service (balcão) workflows.
+GLA Stock (formerly GLA WMS) is a warehouse management system designed for logistics operations in Brazil. It manages the full lifecycle of warehouse order fulfillment — from order entry via ERP synchronization through picking (separação), verification (conferência), and counter service (balcão) workflows. The system is optimized for handheld Zebra TC21 collector devices with compact, touch-friendly UIs.
 
 The system uses a work unit model where atomic tasks are assigned to operators with a locking mechanism (TTL + heartbeat) to prevent concurrent conflicts. Orders flow through defined status states: `pendente` → `em_separacao` → `separado` → `em_conferencia` → `conferido` → `finalizado`. Role-based access control ensures supervisors, pickers, verifiers, and counter attendants each see only their relevant interfaces.
+
+### Module Color Themes
+- **Separação**: Blue theme (hsl 210) — `data-module="separacao"`
+- **Conferência**: Teal theme (hsl 168) — `data-module="conferencia"`
+- **Balcão**: Amber theme (hsl 30) — `data-module="balcao"`
+
+### Module Workflow Patterns
+All three operational modules (Separação, Conferência, Balcão) follow the same handheld-optimized multi-step flow:
+1. **Select**: Choose orders with checkboxes, filter by date range and order ID
+2. **Scan Cart**: Scan a cart/pallet QR code to associate with the session
+3. **Picking/Checking**: Scan barcodes to process items, with product view and list view tabs
+
+Key differences:
+- **Separação**: Filters by user's assigned sections, shows pending orders, tracks separatedQty vs quantity
+- **Conferência**: Shows ALL sections (no section filter), only separated orders, tracks checkedQty vs separatedQty
+- **Balcão**: Shows ALL sections (no section filter), any order (except finalizado), tracks separatedQty vs quantity, includes elapsed timer
 
 The project lives primarily in the `GLA_WMS_Test/` directory, which contains the full application. The root-level `package.json` is minimal and separate from the actual application.
 

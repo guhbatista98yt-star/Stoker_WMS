@@ -79,7 +79,7 @@ export default function HomePage() {
   return (
     <div className="min-h-screen bg-background">
       <GradientHeader
-        title="GLA WMS"
+        title="GLA Stock"
         subtitle={`Bem-vindo, ${user?.name || "Operador"}`}
       >
         <Button
