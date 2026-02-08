@@ -609,98 +609,29 @@ export default function UsersPage() {
                   </FormItem>
                 )}
               />
-              <div className="flex justify-between items-start gap-4">
-                <FormField
-                  control={editForm.control}
-                  name="active"
-                  render={({ field }) => (
-                    <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm flex-1">
-                      <div className="space-y-0.5">
-                        <FormLabel>Usuário Ativo</FormLabel>
-                        <FormDescription>
-                          Desativar para bloquear acesso
-                        </FormDescription>
-                      </div>
-                      <FormControl>
-                        {user && user.id === editingUser?.id ? (
-                          <div title="Você não pode desativar seu próprio usuário" className="cursor-not-allowed">
-                            <Switch checked={true} disabled />
-                          </div>
-                        ) : (
-                          <Switch
-                            checked={field.value}
-                            onCheckedChange={field.onChange}
-                          />
-                        )}
-                      </FormControl>
-                    </FormItem>
-                  )}
-                />
-              </div>
-
               <FormField
                 control={editForm.control}
-                name="name"
+                name="active"
                 render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Nome Completo</FormLabel>
+                  <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                    <div className="space-y-0.5">
+                      <FormLabel>Usuário Ativo</FormLabel>
+                      <FormDescription>
+                        Desativar para bloquear acesso
+                      </FormDescription>
+                    </div>
                     <FormControl>
-                      <Input {...field} placeholder="Nome do operador" />
+                      {user && user.id === editingUser?.id ? (
+                        <div title="Você não pode desativar seu próprio usuário" className="cursor-not-allowed">
+                          <Switch checked={true} disabled />
+                        </div>
+                      ) : (
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={field.onChange}
+                        />
+                      )}
                     </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={editForm.control}
-                name="username"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Usuário</FormLabel>
-                    <FormControl>
-                      <Input {...field} disabled className="bg-muted" />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={editForm.control}
-                name="password"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Nova Senha (Opcional)</FormLabel>
-                    <FormControl>
-                      <Input
-                        {...field}
-                        type="password"
-                        placeholder="Deixe em branco para manter a atual"
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={editForm.control}
-                name="role"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Perfil</FormLabel>
-                    <Select onValueChange={field.onChange} defaultValue={field.value}>
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Selecione o perfil" />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value="supervisor">Supervisor</SelectItem>
-                        <SelectItem value="separacao">Separação</SelectItem>
-                        <SelectItem value="conferencia">Conferência</SelectItem>
-                        <SelectItem value="balcao">Balcão</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
                   </FormItem>
                 )}
               />

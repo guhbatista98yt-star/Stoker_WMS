@@ -1,10 +1,33 @@
 import { db } from "./db";
-import { users, routes, products, orders, orderItems, workUnits } from "@shared/schema";
+import { users, routes, products, orders, orderItems, workUnits, sections } from "@shared/schema";
 import { hashPassword } from "./auth";
 import { eq } from "drizzle-orm";
 
+async function seedSections() {
+  const existingSections = await db.select().from(sections);
+  if (existingSections.length > 0) return;
+
+  const sectionData = [
+    { id: 1, name: "Mercearia" },
+    { id: 2, name: "Laticínios" },
+    { id: 3, name: "Bebidas" },
+    { id: 4, name: "Limpeza" },
+    { id: 5, name: "Higiene" },
+    { id: 6, name: "Hortifruti" },
+    { id: 7, name: "Carnes" },
+    { id: 8, name: "Congelados" },
+    { id: 9, name: "Padaria" },
+    { id: 10, name: "Frios" },
+  ];
+
+  await db.insert(sections).values(sectionData);
+  console.log("Sections seeded:", sectionData.length);
+}
+
 export async function seedDatabase() {
   console.log("Seeding database...");
+
+  await seedSections();
 
   // Check if already seeded
   console.log("Checking for existing users...");

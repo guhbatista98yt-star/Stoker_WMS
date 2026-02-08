@@ -54,6 +54,7 @@ export interface IStorage {
   setOrderPriority(orderIds: string[], priority: number): Promise<void>;
   launchOrders(orderIds: string[]): Promise<void>;
   checkAndUpdateOrderStatus(orderId: string): Promise<WorkUnit | null>;
+  recalculateOrderStatus(orderId: string): Promise<void>;
 
   // Order Items
   createOrderItem(item: InsertOrderItem): Promise<OrderItem>;
@@ -297,7 +298,6 @@ export class DatabaseStorage implements IStorage {
     await db.update(orders)
       .set({
         isLaunched: true,
-        status: "em_separacao", // Explicitly set status
         updatedAt: new Date().toISOString()
       })
       .where(inArray(orders.id, orderIds));
@@ -336,14 +336,34 @@ export class DatabaseStorage implements IStorage {
           pickupPoint: 0,
         }).returning();
       }
-    } else {
-      // Ensure status is em_separacao if launched and not all picked
-      // (Optional, but good for consistency if it was somehow reverted)
-      await db.update(orders)
-        .set({ status: "em_separacao" })
-        .where(and(eq(orders.id, orderId), eq(orders.isLaunched, true), eq(orders.status, "pendente")));
     }
     return createdWorkUnit;
+  }
+
+  async recalculateOrderStatus(orderId: string): Promise<void> {
+    const order = await this.getOrderById(orderId);
+    if (!order || !order.isLaunched) return;
+    if (["separado", "conferido", "em_conferencia", "finalizado"].includes(order.status)) return;
+
+    const items = await this.getOrderItemsByOrderId(orderId);
+    const allItemsPicked = items.length > 0 && items.every(i => Number(i.separatedQty) >= Number(i.quantity));
+
+    if (allItemsPicked) {
+      return;
+    }
+
+    const orderWorkUnits = await db.select().from(workUnits)
+      .where(and(eq(workUnits.orderId, orderId), eq(workUnits.type, "separacao")));
+
+    const anyInProgress = orderWorkUnits.some(wu => wu.status === "em_andamento");
+
+    const newStatus = anyInProgress ? "em_separacao" : "pendente";
+
+    if (order.status !== newStatus) {
+      await db.update(orders)
+        .set({ status: newStatus as any, updatedAt: new Date().toISOString() })
+        .where(eq(orders.id, orderId));
+    }
   }
 
   // Order Items
