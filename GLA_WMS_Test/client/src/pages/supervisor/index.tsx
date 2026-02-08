@@ -28,6 +28,7 @@ import {
   LogOut,
   RefreshCw,
   Route,
+  SlidersHorizontal,
 } from "lucide-react";
 import type { Order } from "@shared/schema";
 import { useSSE } from "@/hooks/use-sse";
@@ -188,6 +189,12 @@ export default function SupervisorDashboard() {
             title="Usuários"
             description="Gerenciar operadores"
             href="/supervisor/users"
+          />
+          <ActionTile
+            icon={SlidersHorizontal}
+            title="Qtd. Manual"
+            description="Regras de quantidade"
+            href="/supervisor/manual-qty-rules"
           />
           <ActionTile
             icon={ClipboardCheck}

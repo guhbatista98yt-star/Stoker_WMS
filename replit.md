@@ -71,6 +71,7 @@ Preferred communication style: Simple, everyday language.
 - `audit_logs` — Full audit trail of system actions
 - `sessions` — Auth sessions with tokens, session keys, and expiration
 - `picking_sessions` — Multi-order picking session tracking
+- `manual_qty_rules` — Rules for allowing manual quantity entry (by product_code, barcode, description_keyword, manufacturer)
 
 ### Authentication & Authorization
 - JWT-style tokens stored in HttpOnly cookies (cookie name: `authToken`)

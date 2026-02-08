@@ -1,11 +1,12 @@
 import { db } from "./db";
 import { eq, and, sql, desc, inArray, isNull, gt, lt } from "drizzle-orm";
 import {
-  users, orders, orderItems, products, routes, workUnits, exceptions, auditLogs, sessions, sections, sectionGroups,
+  users, orders, orderItems, products, routes, workUnits, exceptions, auditLogs, sessions, sections, sectionGroups, manualQtyRules,
   type User, type InsertUser, type Order, type InsertOrder, type OrderItem, type InsertOrderItem,
   type Product, type InsertProduct, type Route, type InsertRoute, type WorkUnit, type InsertWorkUnit,
   type Exception, type InsertException, type AuditLog, type InsertAuditLog, type Session,
   type SectionGroup, type InsertSectionGroup, type Section, pickingSessions, type PickingSession, type InsertPickingSession,
+  type ManualQtyRule, type InsertManualQtyRule,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 
@@ -92,6 +93,13 @@ export interface IStorage {
   updatePickingSessionHeartbeat(id: string): Promise<void>;
   deletePickingSession(orderId: string, sectionId: string): Promise<void>;
   getPickingSessionsByOrder(orderId: string): Promise<PickingSession[]>;
+
+  // Manual Quantity Rules
+  getAllManualQtyRules(): Promise<ManualQtyRule[]>;
+  createManualQtyRule(rule: InsertManualQtyRule): Promise<ManualQtyRule>;
+  updateManualQtyRule(id: string, data: Partial<InsertManualQtyRule>): Promise<ManualQtyRule | undefined>;
+  deleteManualQtyRule(id: string): Promise<void>;
+  checkProductManualQty(product: Product): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -107,11 +115,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
-    const user = {
-      ...insertUser,
-      role: insertUser.role as any, // Cast to match schema type
-    };
-    const [newUser] = await db.insert(users).values(user).returning();
+    const [newUser] = await db.insert(users).values(insertUser as any).returning();
     return newUser;
   }
 
@@ -854,6 +858,47 @@ export class DatabaseStorage implements IStorage {
 
   async getPickingSessionsByOrder(orderId: string): Promise<PickingSession[]> {
     return await db.select().from(pickingSessions).where(eq(pickingSessions.orderId, orderId));
+  }
+
+  // Manual Quantity Rules
+  async getAllManualQtyRules(): Promise<ManualQtyRule[]> {
+    return await db.select().from(manualQtyRules).orderBy(desc(manualQtyRules.createdAt));
+  }
+
+  async createManualQtyRule(rule: InsertManualQtyRule): Promise<ManualQtyRule> {
+    const [newRule] = await db.insert(manualQtyRules).values(rule as any).returning();
+    return newRule;
+  }
+
+  async updateManualQtyRule(id: string, data: Partial<InsertManualQtyRule>): Promise<ManualQtyRule | undefined> {
+    const [updated] = await db.update(manualQtyRules).set(data as any).where(eq(manualQtyRules.id, id)).returning();
+    return updated;
+  }
+
+  async deleteManualQtyRule(id: string): Promise<void> {
+    await db.delete(manualQtyRules).where(eq(manualQtyRules.id, id));
+  }
+
+  async checkProductManualQty(product: Product): Promise<boolean> {
+    const rules = await db.select().from(manualQtyRules).where(eq(manualQtyRules.active, true));
+    
+    for (const rule of rules) {
+      switch (rule.ruleType) {
+        case "product_code":
+          if (product.erpCode === rule.value) return true;
+          break;
+        case "barcode":
+          if (product.barcode === rule.value || product.boxBarcode === rule.value) return true;
+          break;
+        case "description_keyword":
+          if (product.name && product.name.toUpperCase().includes(rule.value.toUpperCase())) return true;
+          break;
+        case "manufacturer":
+          if (product.manufacturer && product.manufacturer.toUpperCase().includes(rule.value.toUpperCase())) return true;
+          break;
+      }
+    }
+    return false;
   }
 }
 

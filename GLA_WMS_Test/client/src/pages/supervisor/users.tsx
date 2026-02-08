@@ -46,7 +46,12 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { Link } from "wouter";
 import { ArrowLeft, Users, Plus, UserCircle, Pencil } from "lucide-react";
-import type { User, Section } from "@shared/schema";
+import type { User, Section, UserSettings } from "@shared/schema";
+
+const settingsSchema = z.object({
+  allowManualQty: z.boolean().default(false),
+  allowMultiplier: z.boolean().default(false),
+});
 
 const createUserSchema = z.object({
   username: z.string().min(3, "Mínimo 3 caracteres"),
@@ -54,6 +59,7 @@ const createUserSchema = z.object({
   name: z.string().min(2, "Nome obrigatório"),
   role: z.enum(["supervisor", "separacao", "conferencia", "balcao"]),
   sections: z.array(z.string()).optional(),
+  settings: settingsSchema.optional(),
   active: z.boolean().default(true),
 });
 
@@ -99,6 +105,7 @@ export default function UsersPage() {
       name: "",
       role: "separacao",
       sections: [],
+      settings: { allowManualQty: false, allowMultiplier: false },
       active: true,
     },
   });
@@ -111,6 +118,7 @@ export default function UsersPage() {
       name: "",
       role: "separacao",
       sections: [],
+      settings: { allowManualQty: false, allowMultiplier: false },
       active: true,
     },
   });
@@ -121,12 +129,17 @@ export default function UsersPage() {
   // Reset edit form when editingUser changes
   useEffect(() => {
     if (editingUser) {
+      const userSettings = (editingUser.settings as UserSettings) || {};
       editForm.reset({
         username: editingUser.username,
         password: "", // Don't show current password
         name: editingUser.name,
         role: editingUser.role as any,
         sections: (editingUser.sections as string[]) || [],
+        settings: {
+          allowManualQty: userSettings.allowManualQty ?? false,
+          allowMultiplier: userSettings.allowMultiplier ?? false,
+        },
         active: editingUser.active,
       });
     }
@@ -228,6 +241,7 @@ export default function UsersPage() {
                     <TableHead>Perfil</TableHead>
                     <TableHead>Seções</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead>Permissões</TableHead>
                     <TableHead className="text-right">Ações</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -283,6 +297,28 @@ export default function UsersPage() {
                               Inativo
                             </Badge>
                           )}
+                        </TableCell>
+                        <TableCell>
+                          {(() => {
+                            const settings = (user.settings as UserSettings) || {};
+                            const hasBadges = settings.allowManualQty || settings.allowMultiplier;
+                            return hasBadges ? (
+                              <div className="flex flex-wrap gap-1">
+                                {settings.allowManualQty && (
+                                  <Badge variant="outline" className="bg-blue-100 text-blue-700 border-0 text-xs">
+                                    Qtd
+                                  </Badge>
+                                )}
+                                {settings.allowMultiplier && (
+                                  <Badge variant="outline" className="bg-blue-100 text-blue-700 border-0 text-xs">
+                                    Mult
+                                  </Badge>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-muted-foreground text-xs italic">—</span>
+                            );
+                          })()}
                         </TableCell>
                         <TableCell className="text-right">
                           <Button
@@ -386,63 +422,105 @@ export default function UsersPage() {
                 )}
               />
               {createRole === "separacao" && (
-                <FormField
-                  control={form.control}
-                  name="sections"
-                  render={() => (
-                    <FormItem>
-                      <div className="mb-4">
-                        <FormLabel className="text-base">Seções (Opcional)</FormLabel>
-                        <FormDescription>
-                          Selecione as seções que este usuário poderá acessar.
-                        </FormDescription>
-                      </div>
-                      {availableSections && availableSections.length > 0 ? (
-                        <div className="grid grid-cols-2 gap-2 border rounded-md p-2 max-h-40 overflow-y-auto">
-                          {availableSections.map((section) => {
-                            const sectionId = String(section.id);
-                            return (
-                              <FormField
-                                key={section.id}
-                                control={form.control}
-                                name="sections"
-                                render={({ field }) => (
-                                  <FormItem
-                                    className="flex flex-row items-start space-x-3 space-y-0"
-                                  >
-                                    <FormControl>
-                                      <Checkbox
-                                        checked={field.value?.includes(sectionId)}
-                                        onCheckedChange={(checked) => {
-                                          return checked
-                                            ? field.onChange([...(field.value || []), sectionId])
-                                            : field.onChange(
-                                              field.value?.filter(
-                                                (value) => value !== sectionId
+                <>
+                  <FormField
+                    control={form.control}
+                    name="sections"
+                    render={() => (
+                      <FormItem>
+                        <div className="mb-4">
+                          <FormLabel className="text-base">Seções (Opcional)</FormLabel>
+                          <FormDescription>
+                            Selecione as seções que este usuário poderá acessar.
+                          </FormDescription>
+                        </div>
+                        {availableSections && availableSections.length > 0 ? (
+                          <div className="grid grid-cols-2 gap-2 border rounded-md p-2 max-h-40 overflow-y-auto">
+                            {availableSections.map((section) => {
+                              const sectionId = String(section.id);
+                              return (
+                                <FormField
+                                  key={section.id}
+                                  control={form.control}
+                                  name="sections"
+                                  render={({ field }) => (
+                                    <FormItem
+                                      className="flex flex-row items-start space-x-3 space-y-0"
+                                    >
+                                      <FormControl>
+                                        <Checkbox
+                                          checked={field.value?.includes(sectionId)}
+                                          onCheckedChange={(checked) => {
+                                            return checked
+                                              ? field.onChange([...(field.value || []), sectionId])
+                                              : field.onChange(
+                                                field.value?.filter(
+                                                  (value) => value !== sectionId
+                                                )
                                               )
-                                            )
-                                        }}
-                                      />
-                                    </FormControl>
-                                    <FormLabel className="font-normal cursor-pointer text-xs">
-                                      <span className="font-mono font-bold mr-1">{section.id}</span>
-                                      {section.name}
-                                    </FormLabel>
-                                  </FormItem>
-                                )}
-                              />
-                            );
-                          })}
+                                          }}
+                                        />
+                                      </FormControl>
+                                      <FormLabel className="font-normal cursor-pointer text-xs">
+                                        <span className="font-mono font-bold mr-1">{section.id}</span>
+                                        {section.name}
+                                      </FormLabel>
+                                    </FormItem>
+                                  )}
+                                />
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="text-sm text-muted-foreground p-2 border rounded bg-muted/20">
+                            Nenhuma seção encontrada. Sincronize o banco para carregar as seções.
+                          </div>
+                        )}
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="settings.allowManualQty"
+                    render={({ field }) => (
+                      <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                        <div className="space-y-0.5">
+                          <FormLabel>Permitir Qtd. Manual</FormLabel>
+                          <FormDescription>
+                            Permite digitar quantidade manualmente
+                          </FormDescription>
                         </div>
-                      ) : (
-                        <div className="text-sm text-muted-foreground p-2 border rounded bg-muted/20">
-                          Nenhuma seção encontrada. Sincronize o banco para carregar as seções.
+                        <FormControl>
+                          <Switch
+                            checked={field.value ?? false}
+                            onCheckedChange={field.onChange}
+                          />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="settings.allowMultiplier"
+                    render={({ field }) => (
+                      <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                        <div className="space-y-0.5">
+                          <FormLabel>Permitir Multiplicador</FormLabel>
+                          <FormDescription>
+                            Permite usar multiplicador de quantidade
+                          </FormDescription>
                         </div>
-                      )}
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                        <FormControl>
+                          <Switch
+                            checked={field.value ?? false}
+                            onCheckedChange={field.onChange}
+                          />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+                </>
               )}
               <div className="flex justify-end gap-2 pt-4">
                 <Button type="button" variant="outline" onClick={() => setShowCreateDialog(false)}>
@@ -627,63 +705,105 @@ export default function UsersPage() {
                 )}
               />
               {editRole === "separacao" && (
-                <FormField
-                  control={editForm.control}
-                  name="sections"
-                  render={() => (
-                    <FormItem>
-                      <div className="mb-4">
-                        <FormLabel className="text-base">Seções</FormLabel>
-                        <FormDescription>
-                          Selecione as seções que este usuário poderá acessar.
-                        </FormDescription>
-                      </div>
-                      {availableSections && availableSections.length > 0 ? (
-                        <div className="grid grid-cols-2 gap-2 border rounded-md p-2 max-h-40 overflow-y-auto">
-                          {availableSections.map((section) => {
-                            const sectionId = String(section.id);
-                            return (
-                              <FormField
-                                key={section.id}
-                                control={editForm.control}
-                                name="sections"
-                                render={({ field }) => (
-                                  <FormItem
-                                    className="flex flex-row items-start space-x-3 space-y-0"
-                                  >
-                                    <FormControl>
-                                      <Checkbox
-                                        checked={field.value?.includes(sectionId)}
-                                        onCheckedChange={(checked) => {
-                                          return checked
-                                            ? field.onChange([...(field.value || []), sectionId])
-                                            : field.onChange(
-                                              field.value?.filter(
-                                                (value) => value !== sectionId
+                <>
+                  <FormField
+                    control={editForm.control}
+                    name="sections"
+                    render={() => (
+                      <FormItem>
+                        <div className="mb-4">
+                          <FormLabel className="text-base">Seções</FormLabel>
+                          <FormDescription>
+                            Selecione as seções que este usuário poderá acessar.
+                          </FormDescription>
+                        </div>
+                        {availableSections && availableSections.length > 0 ? (
+                          <div className="grid grid-cols-2 gap-2 border rounded-md p-2 max-h-40 overflow-y-auto">
+                            {availableSections.map((section) => {
+                              const sectionId = String(section.id);
+                              return (
+                                <FormField
+                                  key={section.id}
+                                  control={editForm.control}
+                                  name="sections"
+                                  render={({ field }) => (
+                                    <FormItem
+                                      className="flex flex-row items-start space-x-3 space-y-0"
+                                    >
+                                      <FormControl>
+                                        <Checkbox
+                                          checked={field.value?.includes(sectionId)}
+                                          onCheckedChange={(checked) => {
+                                            return checked
+                                              ? field.onChange([...(field.value || []), sectionId])
+                                              : field.onChange(
+                                                field.value?.filter(
+                                                  (value) => value !== sectionId
+                                                )
                                               )
-                                            )
-                                        }}
-                                      />
-                                    </FormControl>
-                                    <FormLabel className="font-normal cursor-pointer text-xs">
-                                      <span className="font-mono font-bold mr-1">{section.id}</span>
-                                      {section.name}
-                                    </FormLabel>
-                                  </FormItem>
-                                )}
-                              />
-                            );
-                          })}
+                                          }}
+                                        />
+                                      </FormControl>
+                                      <FormLabel className="font-normal cursor-pointer text-xs">
+                                        <span className="font-mono font-bold mr-1">{section.id}</span>
+                                        {section.name}
+                                      </FormLabel>
+                                    </FormItem>
+                                  )}
+                                />
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="text-sm text-muted-foreground p-2 border rounded bg-muted/20">
+                            Nenhuma seção encontrada.
+                          </div>
+                        )}
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={editForm.control}
+                    name="settings.allowManualQty"
+                    render={({ field }) => (
+                      <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                        <div className="space-y-0.5">
+                          <FormLabel>Permitir Qtd. Manual</FormLabel>
+                          <FormDescription>
+                            Permite digitar quantidade manualmente
+                          </FormDescription>
                         </div>
-                      ) : (
-                        <div className="text-sm text-muted-foreground p-2 border rounded bg-muted/20">
-                          Nenhuma seção encontrada.
+                        <FormControl>
+                          <Switch
+                            checked={field.value ?? false}
+                            onCheckedChange={field.onChange}
+                          />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={editForm.control}
+                    name="settings.allowMultiplier"
+                    render={({ field }) => (
+                      <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                        <div className="space-y-0.5">
+                          <FormLabel>Permitir Multiplicador</FormLabel>
+                          <FormDescription>
+                            Permite usar multiplicador de quantidade
+                          </FormDescription>
                         </div>
-                      )}
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                        <FormControl>
+                          <Switch
+                            checked={field.value ?? false}
+                            onCheckedChange={field.onChange}
+                          />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+                </>
               )}
               <div className="flex justify-end gap-2 pt-4">
                 <Button type="button" variant="outline" onClick={() => setEditingUser(null)}>

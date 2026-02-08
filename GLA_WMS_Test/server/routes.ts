@@ -1119,6 +1119,137 @@ export async function registerRoutes(
     }
   });
 
+  // Manual Quantity Rules
+  app.get("/api/manual-qty-rules", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const rules = await storage.getAllManualQtyRules();
+      res.json(rules);
+    } catch (error) {
+      console.error("Get manual qty rules error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.post("/api/manual-qty-rules", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      const { ruleType, value, description } = req.body;
+      if (!ruleType || !value) {
+        return res.status(400).json({ error: "Tipo e valor são obrigatórios" });
+      }
+      const rule = await storage.createManualQtyRule({
+        ruleType,
+        value: value.trim(),
+        description: description || null,
+        createdBy: (req as any).user.id,
+      });
+
+      await storage.createAuditLog({
+        userId: (req as any).user.id,
+        action: "create_manual_qty_rule",
+        entityType: "manual_qty_rule",
+        entityId: rule.id,
+        details: `Regra ${ruleType}: "${value}" criada`,
+        ipAddress: getClientIp(req),
+        userAgent: getUserAgent(req),
+      });
+
+      res.json(rule);
+    } catch (error) {
+      console.error("Create manual qty rule error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.patch("/api/manual-qty-rules/:id", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      const id = req.params.id as string;
+      const { ruleType, value, description, active } = req.body;
+      const updates: any = {};
+      if (ruleType !== undefined) updates.ruleType = ruleType;
+      if (value !== undefined) updates.value = value.trim();
+      if (description !== undefined) updates.description = description;
+      if (active !== undefined) updates.active = active;
+
+      const updated = await storage.updateManualQtyRule(id, updates);
+      if (!updated) return res.status(404).json({ error: "Regra não encontrada" });
+
+      res.json(updated);
+    } catch (error) {
+      console.error("Update manual qty rule error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.delete("/api/manual-qty-rules/:id", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+    try {
+      const id = req.params.id as string;
+      await storage.deleteManualQtyRule(id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete manual qty rule error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.post("/api/manual-qty-rules/check", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const { productIds } = req.body;
+      if (!Array.isArray(productIds)) {
+        return res.status(400).json({ error: "productIds deve ser um array" });
+      }
+
+      const allProducts = await storage.getAllProducts();
+      const results: Record<string, boolean> = {};
+
+      for (const productId of productIds) {
+        const product = allProducts.find(p => p.id === productId);
+        if (product) {
+          results[productId] = await storage.checkProductManualQty(product);
+        } else {
+          results[productId] = false;
+        }
+      }
+
+      res.json(results);
+    } catch (error) {
+      console.error("Check manual qty rules error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  // Report PDF generation endpoint
+  app.post("/api/reports/picking-list/generate", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const { orderIds, pickupPoints, mode, sections: filterSections, groupId } = req.body;
+
+      if (!orderIds || !Array.isArray(orderIds) || orderIds.length === 0) {
+        return res.status(400).json({ error: "Selecione pelo menos um pedido" });
+      }
+
+      const reportData = await storage.getPickingListReportData({
+        orderIds,
+        pickupPoints: pickupPoints?.map(String),
+        sections: filterSections,
+      });
+
+      const selectedOrders: any[] = [];
+      for (const oid of orderIds) {
+        const order = await storage.getOrderWithItems(oid);
+        if (order) selectedOrders.push(order);
+      }
+
+      res.json({
+        reportData,
+        orders: selectedOrders,
+        filters: { orderIds, pickupPoints, mode, sections: filterSections, groupId },
+        generatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error("Generate picking list error:", error);
+      res.status(500).json({ error: "Erro ao gerar relatório" });
+    }
+  });
+
   app.delete("/api/exceptions/item/:orderItemId", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const orderItemId = req.params.orderItemId as string;
