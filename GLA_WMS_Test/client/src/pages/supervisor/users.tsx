@@ -437,7 +437,7 @@ export default function UsersPage() {
                         {availableSections && availableSections.length > 0 ? (
                           <div className="grid grid-cols-2 gap-2 border rounded-md p-2 max-h-40 overflow-y-auto">
                             {availableSections.map((section) => {
-                              const sectionId = String(section.id);
+                              const sectionValue = section.name;
                               return (
                                 <FormField
                                   key={section.id}
@@ -449,13 +449,13 @@ export default function UsersPage() {
                                     >
                                       <FormControl>
                                         <Checkbox
-                                          checked={field.value?.includes(sectionId)}
+                                          checked={field.value?.includes(sectionValue)}
                                           onCheckedChange={(checked) => {
                                             return checked
-                                              ? field.onChange([...(field.value || []), sectionId])
+                                              ? field.onChange([...(field.value || []), sectionValue])
                                               : field.onChange(
                                                 field.value?.filter(
-                                                  (value) => value !== sectionId
+                                                  (value) => value !== sectionValue
                                                 )
                                               )
                                           }}
@@ -651,7 +651,7 @@ export default function UsersPage() {
                         {availableSections && availableSections.length > 0 ? (
                           <div className="grid grid-cols-2 gap-2 border rounded-md p-2 max-h-40 overflow-y-auto">
                             {availableSections.map((section) => {
-                              const sectionId = String(section.id);
+                              const sectionValue = section.name;
                               return (
                                 <FormField
                                   key={section.id}
@@ -663,13 +663,13 @@ export default function UsersPage() {
                                     >
                                       <FormControl>
                                         <Checkbox
-                                          checked={field.value?.includes(sectionId)}
+                                          checked={field.value?.includes(sectionValue)}
                                           onCheckedChange={(checked) => {
                                             return checked
-                                              ? field.onChange([...(field.value || []), sectionId])
+                                              ? field.onChange([...(field.value || []), sectionValue])
                                               : field.onChange(
                                                 field.value?.filter(
-                                                  (value) => value !== sectionId
+                                                  (value) => value !== sectionValue
                                                 )
                                               )
                                           }}

@@ -371,7 +371,7 @@ export default function PickingListReport() {
             const sortedSections = Array.from(sectionGroups.keys()).sort();
             for (const sectionName of sortedSections) {
                 const items = sectionGroups.get(sectionName)!.sort((a, b) => a.erpCode.localeCompare(b.erpCode));
-                bodyHtml += `<tr class="section-row"><td colspan="6"><strong>Seção: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;${sectionName.toUpperCase()}</strong></td></tr>`;
+                bodyHtml += `<tr class="section-row"><td colspan="6"><strong>Seção:</strong> &nbsp;&nbsp;&nbsp;&nbsp;<strong>${sectionName.toUpperCase()}</strong></td></tr>`;
 
                 for (const item of items) {
                     const qtyFormatted = item.totalQty % 1 === 0 ? item.totalQty.toFixed(0) + ",00" : item.totalQty.toFixed(2).replace(".", ",");
@@ -381,46 +381,52 @@ export default function PickingListReport() {
                         <td>${item.barcode}</td>
                         <td></td>
                         <td>${item.manufacturer}</td>
-                        <td style="text-align:right">${qtyFormatted}</td>
+                        <td style="text-align:right; font-weight:bold">${qtyFormatted}</td>
                     </tr>`;
                 }
 
-                bodyHtml += `<tr class="count-row"><td colspan="6"><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;${items.length}</strong></td></tr>`;
+                bodyHtml += `<tr class="count-row"><td colspan="6" style="padding-left:30px"><strong>${items.length}</strong> ite${items.length === 1 ? 'm' : 'ns'}</td></tr>`;
                 grandTotal += items.length;
             }
 
-            bodyHtml += `<tr class="total-row"><td colspan="6"><strong>Total</strong></td></tr>`;
-            bodyHtml += `<tr class="total-row"><td colspan="6"><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<u>${grandTotal}</u></strong></td></tr>`;
+            bodyHtml += `<tr class="total-row final"><td colspan="5"><strong>Total</strong></td><td style="text-align:right"><strong>${grandTotal}</strong></td></tr>`;
 
             const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>${titlePrefix}Romaneio de Separação</title>
 <style>
-    body { font-family: Arial, sans-serif; margin: 15px 20px; font-size: 10px; color: #000; }
-    .header { text-align: center; margin-bottom: 6px; }
-    .header h1 { font-size: 16px; font-weight: bold; margin: 0 0 6px 0; }
-    .header .params { font-size: 9px; color: #333; line-height: 1.5; }
-    .sub-header { display: flex; justify-content: space-between; border-bottom: 1px solid #000; padding-bottom: 2px; margin-bottom: 4px; font-size: 9px; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Arial, Helvetica, sans-serif; margin: 20px 25px; font-size: 12px; color: #000; line-height: 1.4; }
+    .header { text-align: center; margin-bottom: 10px; }
+    .header h1 { font-size: 20px; font-weight: bold; margin: 0 0 8px 0; letter-spacing: 0.5px; }
+    .header .params { font-size: 11px; color: #222; line-height: 1.6; }
+    .header .params span.label { color: #555; }
+    .sub-header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #000; padding-bottom: 4px; margin-bottom: 8px; font-size: 11px; }
     .sub-header .left { font-style: italic; text-decoration: underline; }
-    .sub-header .right { text-align: right; }
-    table { width: 100%; border-collapse: collapse; }
-    th { border-top: 1px solid #000; border-bottom: 1px solid #000; padding: 3px 5px; text-align: left; font-size: 9px; font-weight: bold; }
+    .sub-header .right { text-align: right; font-size: 10px; line-height: 1.4; }
+    table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+    th { border-top: 2px solid #000; border-bottom: 2px solid #000; padding: 6px 8px; text-align: left; font-size: 12px; font-weight: bold; background: #f5f5f5; }
     th:last-child { text-align: right; }
-    td { padding: 2px 5px; font-size: 9px; border: none; }
+    td { padding: 4px 8px; font-size: 12px; border: none; vertical-align: middle; }
     td:last-child { text-align: right; }
-    .section-row td { padding-top: 8px; padding-bottom: 2px; border: none; font-size: 9px; }
-    .count-row td { padding-top: 2px; border: none; font-size: 9px; }
-    .total-row td { padding-top: 2px; border: none; font-size: 9px; }
+    td:first-child { font-weight: 500; }
+    tr:nth-child(even):not(.section-row):not(.count-row):not(.total-row) { background: #fafafa; }
+    .section-row td { padding-top: 14px; padding-bottom: 4px; border-bottom: 1px solid #ccc; font-size: 13px; background: transparent !important; }
+    .count-row td { padding-top: 4px; padding-bottom: 2px; font-size: 11px; color: #444; background: transparent !important; }
+    .total-row td { padding-top: 6px; font-size: 13px; background: transparent !important; }
+    .total-row.final td { border-top: 2px solid #000; padding-top: 8px; font-size: 14px; }
     @media print {
-        body { margin: 5mm; }
-        @page { size: landscape; margin: 5mm; }
+        body { margin: 8mm 10mm; }
+        @page { size: landscape; margin: 8mm; }
+        tr { page-break-inside: avoid; }
+        .section-row { page-break-after: avoid; }
     }
 </style></head><body>
 <div class="header">
     <h1>${titlePrefix}Romaneio de Separação</h1>
     <div class="params">
-        Informe o Ponto de Retirada::&nbsp; Multi-valor ${ppLabel}<br/>
-        Informe os Pedidos::&nbsp; Multi-valor ${orderIdsLabel}<br/>
-        Informe o Local de Estoque::&nbsp; Multi-valor ${sectionFilterLabel}
+        <span class="label">Ponto de Retirada:</span> ${ppLabel}<br/>
+        <span class="label">Pedidos:</span> ${orderIdsLabel}<br/>
+        <span class="label">Local de Estoque:</span> ${sectionFilterLabel}
     </div>
 </div>
 <div class="sub-header">
@@ -430,12 +436,12 @@ export default function PickingListReport() {
 <table>
     <thead>
         <tr>
-            <th>Cód. Produto</th>
-            <th>Descrição do Produto</th>
-            <th>Cód. de Barras</th>
-            <th>Lote</th>
-            <th>Fornecedor</th>
-            <th>Separar</th>
+            <th style="width:10%">Cód. Produto</th>
+            <th style="width:35%">Descrição do Produto</th>
+            <th style="width:18%">Cód. de Barras</th>
+            <th style="width:8%">Lote</th>
+            <th style="width:19%">Fornecedor</th>
+            <th style="width:10%">Separar</th>
         </tr>
     </thead>
     <tbody>${bodyHtml}</tbody>
