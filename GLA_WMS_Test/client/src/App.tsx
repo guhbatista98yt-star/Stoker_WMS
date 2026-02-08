@@ -83,85 +83,85 @@ function Router() {
       </Route>
 
       <Route path="/supervisor">
-        <ProtectedRoute allowedRoles={["supervisor"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "administrador"]}>
           <SupervisorDashboard />
         </ProtectedRoute>
       </Route>
 
       <Route path="/supervisor/orders">
-        <ProtectedRoute allowedRoles={["supervisor"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "administrador"]}>
           <OrdersPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/supervisor/exceptions">
-        <ProtectedRoute allowedRoles={["supervisor"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "administrador"]}>
           <ExceptionsPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/supervisor/users">
-        <ProtectedRoute allowedRoles={["supervisor"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "administrador"]}>
           <UsersPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/supervisor/manual-qty-rules">
-        <ProtectedRoute allowedRoles={["supervisor"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "administrador"]}>
           <ManualQtyRulesPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/supervisor/routes">
-        <ProtectedRoute allowedRoles={["supervisor"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "administrador"]}>
           <RoutesPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/supervisor/route-orders">
-        <ProtectedRoute allowedRoles={["supervisor"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "administrador"]}>
           <RouteOrdersPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/supervisor/reports">
-        <ProtectedRoute allowedRoles={["supervisor"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "administrador"]}>
           <ReportsPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/supervisor/reports/picking-list">
-        <ProtectedRoute allowedRoles={["supervisor"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "administrador"]}>
           <PickingListReportPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/supervisor/mapping-studio">
-        <ProtectedRoute allowedRoles={["supervisor"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "administrador"]}>
           <MappingStudioPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/separacao">
-        <ProtectedRoute allowedRoles={["separacao"]}>
+        <ProtectedRoute allowedRoles={["separacao", "administrador"]}>
           <SeparacaoPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/conferencia">
-        <ProtectedRoute allowedRoles={["supervisor", "conferencia"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "conferencia", "administrador"]}>
           <ConferenciaPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/balcao">
-        <ProtectedRoute allowedRoles={["supervisor", "balcao"]}>
+        <ProtectedRoute allowedRoles={["supervisor", "balcao", "administrador"]}>
           <BalcaoPage />
         </ProtectedRoute>
       </Route>
 
       <Route path="/handheld/picking">
-        <ProtectedRoute allowedRoles={["separacao"]}>
+        <ProtectedRoute allowedRoles={["separacao", "administrador"]}>
           <PickingPage />
         </ProtectedRoute>
       </Route>

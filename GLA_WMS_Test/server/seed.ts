@@ -44,15 +44,15 @@ export async function seedDatabase() {
   const operatorPassword = await hashPassword("1234");
   console.log("Passwords hashed.");
 
-  console.log("Creating supervisor...");
+  console.log("Creating administrador...");
   const [supervisor] = await db.insert(users).values({
     username: "admin",
     password: supervisorPassword,
     name: "Carlos Silva",
-    role: "supervisor" as any,
+    role: "administrador" as any,
     active: true,
   }).returning();
-  console.log("Supervisor created.");
+  console.log("Administrador created.");
 
   const [separador] = await db.insert(users).values({
     username: "joao",

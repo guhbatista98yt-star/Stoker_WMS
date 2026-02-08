@@ -80,7 +80,7 @@ Preferred communication style: Simple, everyday language.
 - Session table with unique session keys for cache invalidation on logout
 - 24-hour token expiry
 - RBAC middleware: `isAuthenticated`, `requireRole` protect API routes
-- Four roles: `supervisor` (full access), `separacao` (picking), `conferencia` (verification), `balcao` (counter)
+- Five roles: `administrador` (full access to all modules), `supervisor` (management access), `separacao` (picking), `conferencia` (verification), `balcao` (counter)
 
 ### Work Unit & Locking System
 - Work units are atomic tasks derived from orders (one per section/pickup-point combination)

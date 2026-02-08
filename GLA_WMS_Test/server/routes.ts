@@ -262,7 +262,7 @@ export async function registerRoutes(
   });
 
   // Users routes
-  app.get("/api/users", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.get("/api/users", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const users = await storage.getAllUsers();
       const safeUsers = users.map(({ password: _, ...u }) => u);
@@ -273,7 +273,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/users", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/users", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const { username, password, name, role } = req.body;
 
@@ -308,7 +308,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/users/:id", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.patch("/api/users/:id", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const id = req.params.id as string;
       const { password, ...updates } = req.body;
@@ -446,7 +446,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/routes", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/routes", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const data = insertRouteSchema.parse(req.body);
       const route = await storage.createRoute(data);
@@ -460,7 +460,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/routes/:id", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.patch("/api/routes/:id", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const id = req.params.id as string;
 
@@ -478,7 +478,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/routes/:id", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.delete("/api/routes/:id", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const id = req.params.id as string;
 
@@ -516,7 +516,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/orders/assign-route", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/orders/assign-route", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const { orderIds, routeId } = req.body;
 
@@ -558,7 +558,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/orders/relaunch", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/orders/relaunch", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const { orderIds } = req.body;
 
@@ -586,7 +586,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/orders/set-priority", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/orders/set-priority", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const { orderIds, priority } = req.body;
       await storage.setOrderPriority(orderIds, priority);
@@ -607,7 +607,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/orders/launch", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/orders/launch", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const { orderIds } = req.body;
 
@@ -684,7 +684,7 @@ export async function registerRoutes(
   });
 
   // Reports
-  app.post("/api/reports/picking-list", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/reports/picking-list", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const { orderIds, pickupPoints, sections } = req.body;
       const data = await storage.getPickingListReportData({ orderIds, pickupPoints, sections });
@@ -1153,7 +1153,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/manual-qty-rules", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/manual-qty-rules", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const { ruleType, value, description } = req.body;
       if (!ruleType || !value) {
@@ -1183,7 +1183,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/manual-qty-rules/:id", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.patch("/api/manual-qty-rules/:id", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const id = req.params.id as string;
       const { ruleType, value, description, active } = req.body;
@@ -1203,7 +1203,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/manual-qty-rules/:id", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.delete("/api/manual-qty-rules/:id", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const id = req.params.id as string;
       await storage.deleteManualQtyRule(id);
@@ -1302,7 +1302,7 @@ export async function registerRoutes(
 
   // ==================== Mapping Studio ====================
 
-  app.get("/api/datasets", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.get("/api/datasets", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       res.json(getAvailableDatasets());
     } catch (error) {
@@ -1311,7 +1311,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/schema/:dataset", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.get("/api/schema/:dataset", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const dataset = req.params.dataset as string;
       const contract = getDataContract(dataset);
@@ -1325,7 +1325,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/mapping/:dataset", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.get("/api/mapping/:dataset", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const dataset = req.params.dataset as string;
       const mapping = await storage.getMappingByDataset(dataset);
@@ -1336,7 +1336,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/mappings", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.get("/api/mappings", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const mappings = await storage.getAllMappings();
       res.json(mappings);
@@ -1346,7 +1346,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/mapping/:dataset", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/mapping/:dataset", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const dataset = req.params.dataset as string;
       const contract = getDataContract(dataset);
@@ -1393,7 +1393,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/mapping/:id/activate", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/mapping/:id/activate", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const id = req.params.id as string;
       const mapping = await storage.activateMapping(id);
@@ -1419,7 +1419,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/preview/:dataset", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.post("/api/preview/:dataset", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const dataset = req.params.dataset as string;
       const contract = getDataContract(dataset);
@@ -1520,7 +1520,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/cache-columns", isAuthenticated, requireRole("supervisor"), async (req: Request, res: Response) => {
+  app.get("/api/cache-columns", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
       const cachedRows = await storage.getCacheOrcamentosPreview(1);
       if (cachedRows.length === 0) {

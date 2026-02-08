@@ -57,7 +57,7 @@ interface CacheColumn {
 }
 
 const CAST_OPTIONS = [
-  { value: "", label: "Nenhum" },
+  { value: "_none", label: "Nenhum" },
   { value: "string", label: "Texto" },
   { value: "number", label: "Número" },
   { value: "divide_100", label: "Dividir por 100" },
@@ -343,14 +343,14 @@ export default function MappingStudioPage() {
                             </TableCell>
                             <TableCell>
                               <Select
-                                value={row.dbExpression}
-                                onValueChange={(val) => updateMappingRow(idx, "dbExpression", val)}
+                                value={row.dbExpression || "_none"}
+                                onValueChange={(val) => updateMappingRow(idx, "dbExpression", val === "_none" ? "" : val)}
                               >
                                 <SelectTrigger className="font-mono text-sm">
                                   <SelectValue placeholder="Selecione coluna..." />
                                 </SelectTrigger>
                                 <SelectContent>
-                                  <SelectItem value="">
+                                  <SelectItem value="_none">
                                     <span className="text-muted-foreground">Nenhuma</span>
                                   </SelectItem>
                                   {cacheColumns.map(col => (
@@ -366,15 +366,15 @@ export default function MappingStudioPage() {
                             </TableCell>
                             <TableCell>
                               <Select
-                                value={row.cast || ""}
-                                onValueChange={(val) => updateMappingRow(idx, "cast", val)}
+                                value={row.cast || "_none"}
+                                onValueChange={(val) => updateMappingRow(idx, "cast", val === "_none" ? "" : val)}
                               >
                                 <SelectTrigger className="text-sm">
                                   <SelectValue placeholder="Nenhum" />
                                 </SelectTrigger>
                                 <SelectContent>
                                   {CAST_OPTIONS.map(opt => (
-                                    <SelectItem key={opt.value} value={opt.value || "_none"}>
+                                    <SelectItem key={opt.value} value={opt.value}>
                                       {opt.label}
                                     </SelectItem>
                                   ))}
