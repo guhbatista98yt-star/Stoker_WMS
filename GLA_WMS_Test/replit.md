@@ -101,3 +101,17 @@ Tables defined in `shared/schema.ts`:
 - Enhanced SSE broadcasting: added picking_started, item_picked, picking_finished, conference_started, conference_finished, exception_created events across backend routes
 - Conference page: enhanced SSE subscriptions for real-time work unit updates, scan-pallet now updates order status to em_conferencia
 - Fixed Windows line endings (CRLF to LF) across all TypeScript files
+- Added `referenceCode` (text) field to products table for CODIGOINTERNOFORN reference codes
+- Added `boxBarcode` seed data for products (some with DUN barcodes, some null)
+- Complete separation module UI/UX overhaul for handheld/collector devices:
+  - Compact header (minimal, no gradient) to maximize screen space
+  - Period filter with "Buscar" button (same pattern as supervisor orders)
+  - Simplified order list: order number, client, qty items (section-filtered), date
+  - Removed cart scan step - goes directly from select to picking
+  - Two-tab bottom navigation: Product detail (Package icon) + Product list (List icon)
+  - Product tab shows: order codes, erpCode, referenceCode, barcode, boxBarcode (or "Indisponivel"), qty with + button
+  - List tab shows: all products with code/barcode/qty/orders, section filter, green checkmarks, exception indicators
+  - Barcode scan always navigates to Product tab
+  - Session persistence via localStorage (auto-resume on reconnect)
+  - Completion returns to initial order list (not cart/complete screen)
+  - SSE real-time updates for all picking events

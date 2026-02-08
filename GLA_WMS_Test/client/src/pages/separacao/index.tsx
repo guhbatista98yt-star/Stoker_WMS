@@ -1,12 +1,8 @@
-import { useState, useEffect, useMemo } from "react";
-import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth, useSessionQueryKey } from "@/lib/auth";
 import { DatePickerWithRange } from "@/components/ui/date-range-picker";
 import { DateRange } from "react-day-picker";
-import { GradientHeader } from "@/components/ui/gradient-header";
-import { SectionCard } from "@/components/ui/section-card";
-import { StatusBadge } from "@/components/ui/status-badge";
 import { ScanInput } from "@/components/ui/scan-input";
 import { ResultDialog } from "@/components/ui/result-dialog";
 import { Button } from "@/components/ui/button";
@@ -15,15 +11,16 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { useSSE } from "@/hooks/use-sse";
 import {
   Package,
+  List,
   LogOut,
-  ShoppingCart,
   Check,
   AlertTriangle,
-  ChevronRight,
   Search,
-  Filter,
+  Plus,
+  ArrowRight,
   Calendar,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -37,12 +34,52 @@ import {
 import type { WorkUnitWithDetails, OrderItem, Product, ExceptionType } from "@shared/schema";
 import { ExceptionDialog } from "@/components/orders/exception-dialog";
 import { getCurrentWeekRange } from "@/lib/date-utils";
+import { format } from "date-fns";
 
-type SeparacaoStep = "select" | "scan_cart" | "picking" | "complete";
+type SeparacaoStep = "select" | "picking";
+type PickingTab = "product" | "list";
+
+const STORAGE_KEY = "wms:separacao-session";
+
+interface SessionData {
+  tab: PickingTab;
+  productIndex: number;
+  workUnitIds: string[];
+}
 
 interface ItemWithProduct extends OrderItem {
   product: Product;
   exceptionQty?: number;
+}
+
+interface AggregatedProduct {
+  product: Product;
+  totalQty: number;
+  separatedQty: number;
+  exceptionQty: number;
+  items: ItemWithProduct[];
+  orderCodes: string[];
+  sections: string[];
+}
+
+function saveSession(data: SessionData) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch {}
+}
+
+function loadSession(): SessionData | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+}
+
+function clearSession() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {}
 }
 
 export default function SeparacaoPage() {
@@ -52,28 +89,27 @@ export default function SeparacaoPage() {
 
   const [step, setStep] = useState<SeparacaoStep>("select");
   const [selectedWorkUnits, setSelectedWorkUnits] = useState<string[]>([]);
-  const [activeWorkUnitId, setActiveWorkUnitId] = useState<string | null>(null);
-
+  const [pickingTab, setPickingTab] = useState<PickingTab>("product");
+  const [currentProductIndex, setCurrentProductIndex] = useState(0);
 
   const [scanStatus, setScanStatus] = useState<"idle" | "success" | "error" | "warning">("idle");
   const [scanMessage, setScanMessage] = useState("");
-  const [lastScannedItemId, setLastScannedItemId] = useState<string | null>(null);
   const [showResultDialog, setShowResultDialog] = useState(false);
   const [resultDialogConfig, setResultDialogConfig] = useState({
     type: "success" as "success" | "error" | "warning",
     title: "",
     message: "",
   });
-  const [cartInputValue, setCartInputValue] = useState("");
 
-  // Exception dialog state
   const [showExceptionDialog, setShowExceptionDialog] = useState(false);
   const [exceptionItem, setExceptionItem] = useState<ItemWithProduct | null>(null);
 
-  // Filters
   const [filterOrderId, setFilterOrderId] = useState("");
   const [dateRange, setDateRange] = useState<DateRange | undefined>(getCurrentWeekRange());
-  const [filterPriority, setFilterPriority] = useState<string>("all");
+  const [tempDateRange, setTempDateRange] = useState<DateRange | undefined>(getCurrentWeekRange());
+  const [sectionFilter, setSectionFilter] = useState<string>("all");
+
+  const [sessionRestored, setSessionRestored] = useState(false);
 
   const workUnitsQueryKey = useSessionQueryKey(["/api/work-units", "separacao"]);
 
@@ -82,10 +118,130 @@ export default function SeparacaoPage() {
     refetchInterval: 1000,
   });
 
-  const activeWorkUnit = useMemo(() => {
-    if (!activeWorkUnitId || !workUnits) return null;
-    return workUnits.find(wu => wu.id === activeWorkUnitId) || null;
-  }, [activeWorkUnitId, workUnits]);
+  const handleSSEMessage = useCallback((type: string, _data: any) => {
+    queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+    if (type === "exception_created") {
+      toast({
+        title: "Nova Exceção",
+        description: "Uma exceção foi registrada",
+        variant: "destructive",
+      });
+    }
+  }, [queryClient, workUnitsQueryKey, toast]);
+
+  useSSE("/api/sse", [
+    "picking_update", "lock_acquired", "lock_released", "picking_started",
+    "item_picked", "exception_created", "picking_finished",
+  ], handleSSEMessage);
+
+  const myLockedUnits = useMemo(() => {
+    if (!workUnits || !user) return [];
+    return workUnits.filter(wu => wu.lockedBy === user.id && wu.status !== "concluido");
+  }, [workUnits, user]);
+
+  const allMyUnits = useMemo(() => {
+    if (!workUnits || !user) return [];
+    return workUnits.filter(wu => wu.lockedBy === user.id);
+  }, [workUnits, user]);
+
+  const aggregatedProducts = useMemo((): AggregatedProduct[] => {
+    const units = allMyUnits.length > 0 ? allMyUnits : [];
+    const allItems: ItemWithProduct[] = units.flatMap(wu => (wu.items as ItemWithProduct[]) || []);
+    const userSections = (user?.sections as string[]) || [];
+    const filteredItems = allItems.filter(item =>
+      userSections.length === 0 || userSections.includes(item.section)
+    );
+
+    const map: Record<string, AggregatedProduct> = {};
+    filteredItems.forEach(item => {
+      const pid = item.productId;
+      if (!map[pid]) {
+        const wu = units.find(w => w.items.some(i => i.productId === pid));
+        map[pid] = {
+          product: item.product,
+          totalQty: 0,
+          separatedQty: 0,
+          exceptionQty: 0,
+          items: [],
+          orderCodes: [],
+          sections: [],
+        };
+      }
+      map[pid].totalQty += Number(item.quantity);
+      map[pid].separatedQty += Number(item.separatedQty);
+      map[pid].exceptionQty += Number(item.exceptionQty || 0);
+      map[pid].items.push(item);
+
+      const wu = units.find(w => w.items.some(i => i.id === item.id));
+      if (wu && !map[pid].orderCodes.includes(wu.order.erpOrderId)) {
+        map[pid].orderCodes.push(wu.order.erpOrderId);
+      }
+      if (item.section && !map[pid].sections.includes(item.section)) {
+        map[pid].sections.push(item.section);
+      }
+    });
+
+    return Object.values(map);
+  }, [allMyUnits, user]);
+
+  const filteredAggregatedProducts = useMemo(() => {
+    if (sectionFilter === "all") return aggregatedProducts;
+    return aggregatedProducts.filter(ap => ap.sections.includes(sectionFilter));
+  }, [aggregatedProducts, sectionFilter]);
+
+  const availableSections = useMemo(() => {
+    const secs = new Set<string>();
+    aggregatedProducts.forEach(ap => ap.sections.forEach(s => secs.add(s)));
+    return Array.from(secs).sort();
+  }, [aggregatedProducts]);
+
+  const currentProduct = filteredAggregatedProducts[currentProductIndex] || filteredAggregatedProducts[0] || null;
+
+  useEffect(() => {
+    if (filteredAggregatedProducts.length > 0 && currentProductIndex >= filteredAggregatedProducts.length) {
+      setCurrentProductIndex(0);
+    }
+  }, [filteredAggregatedProducts.length, currentProductIndex]);
+
+  useEffect(() => {
+    if (workUnits && user && !sessionRestored) {
+      setSessionRestored(true);
+      const saved = loadSession();
+      if (saved && saved.workUnitIds.length > 0) {
+        const stillLockedIds = saved.workUnitIds.filter(id =>
+          workUnits.some(wu => wu.id === id && wu.lockedBy === user.id)
+        );
+        if (stillLockedIds.length > 0) {
+          setStep("picking");
+          setPickingTab(saved.tab);
+          setCurrentProductIndex(0);
+          setSelectedWorkUnits(stillLockedIds);
+          toast({ title: "Sessão Restaurada", description: "Retomando separação anterior" });
+          return;
+        } else {
+          clearSession();
+        }
+      }
+
+      const myUnit = workUnits.find(wu => wu.lockedBy === user.id && wu.status !== "concluido");
+      if (myUnit) {
+        const myIds = workUnits.filter(wu => wu.lockedBy === user.id).map(wu => wu.id);
+        setStep("picking");
+        setSelectedWorkUnits(myIds);
+        toast({ title: "Sessão Restaurada", description: `Retomando pedido ${myUnit.order.erpOrderId}` });
+      }
+    }
+  }, [workUnits, user, sessionRestored, toast]);
+
+  useEffect(() => {
+    if (step === "picking" && allMyUnits.length > 0) {
+      saveSession({
+        tab: pickingTab,
+        productIndex: currentProductIndex,
+        workUnitIds: allMyUnits.map(wu => wu.id),
+      });
+    }
+  }, [step, pickingTab, currentProductIndex, allMyUnits]);
 
   const lockMutation = useMutation({
     mutationFn: async (workUnitIds: string[]) => {
@@ -108,26 +264,12 @@ export default function SeparacaoPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+      clearSession();
       setSelectedWorkUnits([]);
       setStep("select");
-      setActiveWorkUnitId(null);
+      setCurrentProductIndex(0);
+      setPickingTab("product");
     },
-  });
-
-  const scanCartMutation = useMutation({
-    mutationFn: async ({ workUnitId, qrCode }: { workUnitId: string; qrCode: string }) => {
-      const res = await apiRequest("POST", `/api/work-units/${workUnitId}/scan-cart`, { qrCode });
-      return res.json();
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
-      if (data.workUnit) {
-        queryClient.setQueryData(workUnitsQueryKey, (oldData: any[]) => {
-          if (!oldData) return oldData;
-          return oldData.map(wu => wu.id === data.workUnit.id ? data.workUnit : wu);
-        });
-      }
-    }
   });
 
   const scanItemMutation = useMutation({
@@ -143,7 +285,7 @@ export default function SeparacaoPage() {
           return oldData.map(wu => wu.id === data.workUnit.id ? data.workUnit : wu);
         });
       }
-    }
+    },
   });
 
   const createExceptionMutation = useMutation({
@@ -159,10 +301,7 @@ export default function SeparacaoPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
-      toast({
-        title: "Exceção Registrada",
-        description: "A exceção foi reportada com sucesso",
-      });
+      toast({ title: "Exceção Registrada", description: "A exceção foi reportada com sucesso" });
       setShowExceptionDialog(false);
       setExceptionItem(null);
     },
@@ -171,15 +310,8 @@ export default function SeparacaoPage() {
       try {
         const errorData = JSON.parse(error.message);
         if (errorData.error) message = errorData.error;
-      } catch {
-        // use default
-      }
-
-      toast({
-        title: "Erro",
-        description: message,
-        variant: "destructive",
-      });
+      } catch {}
+      toast({ title: "Erro", description: message, variant: "destructive" });
     },
   });
 
@@ -190,17 +322,9 @@ export default function SeparacaoPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
-      setStep("complete");
-      toast({
-        title: "Sucesso", // No description needed
-      });
     },
     onError: () => {
-      toast({
-        title: "Erro",
-        description: "Itens pendentes.",
-        variant: "destructive",
-      });
+      toast({ title: "Erro", description: "Itens pendentes.", variant: "destructive" });
     },
   });
 
@@ -211,103 +335,48 @@ export default function SeparacaoPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
-      toast({
-        title: "Exceções Limpas",
-        description: "As exceções foram removidas com sucesso",
-      });
+      toast({ title: "Exceções Limpas", description: "As exceções foram removidas com sucesso" });
     },
     onError: () => {
-      toast({
-        title: "Erro",
-        description: "Falha ao limpar exceções",
-        variant: "destructive",
-      });
+      toast({ title: "Erro", description: "Falha ao limpar exceções", variant: "destructive" });
     },
   });
 
-  // Auto-resume session
-  useEffect(() => {
-    if (workUnits && user && step === "select" && !activeWorkUnit) {
-      const myUnit = workUnits.find(
-        (wu) => wu.lockedBy === user.id && wu.status !== "concluido"
-      );
-      if (myUnit) {
-        // Resume session - either to scan_cart or picking depending on progress
-        setActiveWorkUnitId(myUnit.id);
-        setStep(myUnit.cartQrCode ? "picking" : "scan_cart");
-        toast({
-          title: "Sessão Restaurada",
-          description: `Retomando pedido ${myUnit.order.erpOrderId}`,
-        });
-      }
-    }
-  }, [workUnits, user, step, activeWorkUnit, toast]);
+  const availableWorkUnits = useMemo(() => {
+    return workUnits?.filter((wu) => {
+      if (wu.status !== "pendente" || (wu.lockedBy && wu.lockedBy !== user?.id)) return false;
+      if (!wu.order.isLaunched) return false;
 
-  const availableWorkUnits = workUnits?.filter((wu) => {
-    // Must be pending and not locked by someone else (lockedBy null is ok, lockedBy me is handled by auto-resume but verified here just in case)
-    if (wu.status !== "pendente" || (wu.lockedBy && wu.lockedBy !== user?.id)) {
-      return false;
-    }
-
-
-    // Only show launched orders
-    if (!wu.order.isLaunched) {
-      return false;
-    }
-
-    // Filter by User Sections (if defined)
-    const userSections = (user?.sections as string[]) || [];
-    if (userSections.length > 0) {
-      // Check if WU has a specific section that matches
-      if (wu.section && !userSections.includes(wu.section)) {
-        return false;
+      const userSections = (user?.sections as string[]) || [];
+      if (userSections.length > 0) {
+        if (wu.section && !userSections.includes(wu.section)) return false;
+        const hasRelevantItems = wu.items.some(item => userSections.includes(item.section));
+        if (!wu.section && !hasRelevantItems) return false;
       }
 
-      // Also check if there are valid items for this user in the WU
-      const hasRelevantItems = wu.items.some(item => userSections.includes(item.section));
-      if (!wu.section && !hasRelevantItems) {
-        return false;
+      if (filterOrderId && !wu.order.erpOrderId.toLowerCase().includes(filterOrderId.toLowerCase())) return false;
+
+      if (dateRange?.from) {
+        const orderDate = new Date(wu.order.createdAt);
+        const fromDate = new Date(dateRange.from);
+        fromDate.setHours(0, 0, 0, 0);
+        if (dateRange.to) {
+          const toDate = new Date(dateRange.to);
+          toDate.setHours(23, 59, 59, 999);
+          if (orderDate < fromDate || orderDate > toDate) return false;
+        } else {
+          if (orderDate < fromDate) return false;
+        }
       }
-    }
 
-
-    // Filters
-    if (filterOrderId && !wu.order.erpOrderId.toLowerCase().includes(filterOrderId.toLowerCase())) {
-      return false;
-    }
-
-    if (dateRange?.from) {
-      const orderDate = new Date(wu.order.createdAt).toISOString().split("T")[0];
-      const fromDate = dateRange.from.toISOString().split("T")[0];
-      if (orderDate < fromDate) return false;
-    }
-
-    if (dateRange?.to) {
-      const orderDate = new Date(wu.order.createdAt).toISOString().split("T")[0];
-      const toDate = dateRange.to.toISOString().split("T")[0];
-      if (orderDate > toDate) return false;
-    }
-
-    if (filterPriority !== "all") {
-      // Assuming priority is numeric on order, high=1, medium=2, etc. Or just match value if string key
-      // Let's assume order.priority maps: 1=High, 2=Medium, 3=Low for this UI
-      // Adjust logic based on actual schema priority type.
-      // Schema says priority is integer. Let's assume specific values or just generic equality if mapped.
-      // For now, let's just filter by exact match or ranges if we knew them.
-      // If we don't have clear priority mapping, maybe just skip or use simple equality.
-      // Let's check schema. Priority is number.
-      if (String(wu.order.priority) !== filterPriority) return false;
-    }
-
-    return true;
-  }) || [];
+      return true;
+    }) || [];
+  }, [workUnits, user, filterOrderId, dateRange]);
 
   const groupedWorkUnits = useMemo(() => {
     const groups: Record<string, typeof availableWorkUnits> = {};
     availableWorkUnits.forEach((wu) => {
-      if (!groups[wu.orderId]) {
-        groups[wu.orderId] = [];
-      }
+      if (!groups[wu.orderId]) groups[wu.orderId] = [];
       groups[wu.orderId].push(wu);
     });
     return Object.values(groups);
@@ -316,168 +385,77 @@ export default function SeparacaoPage() {
   const handleSelectGroup = (wus: typeof availableWorkUnits, checked: boolean) => {
     const ids = wus.map((wu) => wu.id);
     if (checked) {
-      // Add all IDs from group, avoiding duplicates
-      setSelectedWorkUnits((prev) => {
-        const newSet = new Set([...prev, ...ids]);
-        return Array.from(newSet);
-      });
+      setSelectedWorkUnits((prev) => Array.from(new Set([...prev, ...ids])));
     } else {
-      // Remove all IDs from group
       setSelectedWorkUnits((prev) => prev.filter((id) => !ids.includes(id)));
-    }
-  };
-
-  const handleSelectWorkUnit = (workUnitId: string, checked: boolean) => {
-    if (checked) {
-      setSelectedWorkUnits((prev) => [...prev, workUnitId]);
-    } else {
-      setSelectedWorkUnits((prev) => prev.filter((id) => id !== workUnitId));
     }
   };
 
   const handleStartSeparation = async () => {
     if (selectedWorkUnits.length === 0) {
-      toast({
-        title: "Atenção",
-        description: "Selecione pelo menos uma unidade de trabalho",
-        variant: "destructive",
-      });
+      toast({ title: "Atenção", description: "Selecione pelo menos um pedido", variant: "destructive" });
       return;
     }
-
     try {
       await lockMutation.mutateAsync(selectedWorkUnits);
-      setStep("scan_cart");
+      setStep("picking");
+      setPickingTab("product");
+      setCurrentProductIndex(0);
     } catch {
-      toast({
-        title: "Erro",
-        description: "Falha ao bloquear unidades de trabalho",
-        variant: "destructive",
-      });
-    }
-  };
-
-  const handleScanCart = async (qrCode: string) => {
-    if (!selectedWorkUnits.length) return;
-
-    try {
-      const result = await scanCartMutation.mutateAsync({
-        workUnitId: selectedWorkUnits[0],
-        qrCode,
-      });
-      setScanStatus("success");
-      setScanMessage("Carrinho validado!");
-      setActiveWorkUnitId(result.workUnit.id);
-      setTimeout(() => {
-        setStep("picking");
-        setScanStatus("idle");
-        setScanMessage("");
-      }, 1000);
-    } catch {
-      setScanStatus("error");
-      setScanMessage("QR Code inválido ou já em uso");
+      toast({ title: "Erro", description: "Falha ao bloquear unidades de trabalho", variant: "destructive" });
     }
   };
 
   const handleScanItem = async (barcode: string) => {
-    // Find the correct work unit for this product (supporting multi-order picking)
-    const myWorkUnits = workUnits?.filter(wu =>
-      wu.lockedBy === user?.id
-    ) || [];
+    const units = allMyUnits;
+    if (units.length === 0) return;
 
-    // Find units containing this product
-    const unitsWithProduct = myWorkUnits.filter(wu =>
-      (wu.items as ItemWithProduct[]).some(item => item.product?.barcode === barcode)
+    const unitsWithProduct = units.filter(wu =>
+      (wu.items as ItemWithProduct[]).some(item =>
+        item.product?.barcode === barcode || item.product?.boxBarcode === barcode
+      )
     );
 
-    // Prioritize unit where the item is not yet complete
     let targetUnit = unitsWithProduct.find(wu => {
-      const item = (wu.items as ItemWithProduct[]).find(i => i.product?.barcode === barcode);
+      const item = (wu.items as ItemWithProduct[]).find(i =>
+        i.product?.barcode === barcode || i.product?.boxBarcode === barcode
+      );
       if (!item) return false;
       const exceptionQty = Number(item.exceptionQty || 0);
       return Number(item.separatedQty) + exceptionQty < Number(item.quantity);
     });
 
-    // If all complete or not found, fallback to first unit with product (will trigger over-quantity) or active unit
-    const finalUnit = targetUnit || unitsWithProduct[0] || activeWorkUnit;
-
-    console.log("[Scan Debug]", { barcode, unitsWithProduct: unitsWithProduct.length, finalUnitId: finalUnit?.id });
-
+    const finalUnit = targetUnit || unitsWithProduct[0] || units[0];
     if (!finalUnit) return;
 
     try {
-      const result = await scanItemMutation.mutateAsync({
-        workUnitId: finalUnit.id,
-        barcode,
-      });
+      const result = await scanItemMutation.mutateAsync({ workUnitId: finalUnit.id, barcode });
 
       if (result.status === "success") {
         setScanStatus("success");
         setScanMessage(`${result.product.name} - ${result.quantity} ${result.product.unit}`);
-        setActiveWorkUnitId(result.workUnit.id);
 
-        // Highlight and scroll to item
-        // We need to find the item ID in the *updated* unit or current unit
-        const currentItem = result.workUnit.items.find((i: any) => i.product.id === result.product.id);
-        if (currentItem) {
-          setLastScannedItemId(currentItem.id);
-          setTimeout(() => {
-            const el = document.getElementById(`item-${currentItem.id}`);
-            if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-          }, 100);
+        const productId = result.product.id;
+        const idx = filteredAggregatedProducts.findIndex(ap => ap.product.id === productId);
+        if (idx >= 0) {
+          setCurrentProductIndex(idx);
         }
+        setPickingTab("product");
 
-        const myWorkUnits = workUnits?.filter(wu =>
-          wu.lockedBy === user?.id
-        ) || [];
-
-        // Create a merged list with the latest update
-        const updatedUnits = myWorkUnits.map(wu =>
-          wu.id === result.workUnit.id ? result.workUnit : wu
-        );
-
-        // Check if all units are fully separated (status 'separado' or 'concluido')
-        // OR check if progress is 100% by calculating logic manually if status isn't reliable yet
-        // Check if all units are fully separated (status 'concluido' implies all items are done)
+        const updatedUnits = units.map(wu => wu.id === result.workUnit.id ? result.workUnit : wu);
         const allCompleted = updatedUnits.every(wu => wu.status === "concluido");
-
         if (allCompleted) {
-          setScanStatus("success");
-          setScanMessage("Todos os itens foram separados! Clique em 'Concluir Separação' para finalizar.");
+          handleCompleteAll();
         }
       } else if (result.status === "over_quantity_with_exception") {
         setScanStatus("error");
         setScanMessage(result.message || "Quantidade excedida considerando exceções");
-        if (result.workUnit) {
-          setActiveWorkUnitId(result.workUnit.id);
-          queryClient.setQueryData(workUnitsQueryKey, (oldData: any[]) => {
-            if (!oldData) return oldData;
-            return oldData.map(wu => wu.id === result.workUnit.id ? result.workUnit : wu);
-          });
-        }
-
-        setResultDialogConfig({
-          type: "warning",
-          title: "Exceções Registradas",
-          message: result.message || `Este item tem exceções registradas. A separação foi resetada.`,
-        });
+        setResultDialogConfig({ type: "warning", title: "Exceções Registradas", message: result.message || "Este item tem exceções registradas." });
         setShowResultDialog(true);
       } else if (result.status === "over_quantity") {
         setScanStatus("error");
-        setScanMessage("Quantidade excedida! Recontagem necessária.");
-        if (result.workUnit) {
-          setActiveWorkUnitId(result.workUnit.id);
-          queryClient.setQueryData(workUnitsQueryKey, (oldData: any[]) => {
-            if (!oldData) return oldData;
-            return oldData.map(wu => wu.id === result.workUnit.id ? result.workUnit : wu);
-          });
-        }
-
-        setResultDialogConfig({
-          type: "error",
-          title: "Quantidade Excedida",
-          message: "O item foi bipado mais vezes que o necessário. Entre em modo recontagem.",
-        });
+        setScanMessage("Quantidade excedida!");
+        setResultDialogConfig({ type: "error", title: "Quantidade Excedida", message: "O item foi bipado mais vezes que o necessário." });
         setShowResultDialog(true);
       } else if (result.status === "not_found") {
         setScanStatus("warning");
@@ -489,498 +467,475 @@ export default function SeparacaoPage() {
     }
   };
 
-  const getProgress = () => {
-    // Get all work units locked by this user
-    const myWorkUnits = workUnits?.filter(wu =>
-      wu.lockedBy === user?.id && wu.status !== "concluido"
-    ) || [];
+  const handleIncrementProduct = async (ap: AggregatedProduct) => {
+    const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
+    if (remaining <= 0) return;
 
-    if (myWorkUnits.length === 0) return 0;
+    const incompleteItem = ap.items.find(i =>
+      Number(i.separatedQty) + Number(i.exceptionQty || 0) < Number(i.quantity)
+    );
+    if (!incompleteItem) return;
 
-    // Combine all items from all locked work units
-    const allItems: ItemWithProduct[] = myWorkUnits.flatMap(wu =>
-      (wu.items as ItemWithProduct[]) || []
-    );
+    const wu = allMyUnits.find(w => w.items.some(i => i.id === incompleteItem.id));
+    if (!wu) return;
 
-    // Filter by user's sections
-    const userSections = (user?.sections as string[]) || [];
-    const filteredItems = allItems.filter(item =>
-      userSections.length === 0 || userSections.includes(item.section)
-    );
+    const barcode = ap.product.barcode;
+    if (!barcode) return;
 
-    const total = filteredItems.reduce(
-      (sum, item) => sum + Number(item.quantity),
-      0
-    );
-    const separated = filteredItems.reduce(
-      (sum, item) => sum + Number(item.separatedQty) + Number(item.exceptionQty || 0),
-      0
-    );
-    return total > 0 ? (separated / total) * 100 : 0;
+    try {
+      const result = await scanItemMutation.mutateAsync({ workUnitId: wu.id, barcode });
+      if (result.status === "success") {
+        setScanStatus("success");
+        setScanMessage(`+1 ${ap.product.name}`);
+      } else if (result.status === "over_quantity") {
+        setScanStatus("error");
+        setScanMessage("Quantidade excedida!");
+      }
+    } catch {
+      setScanStatus("error");
+      setScanMessage("Erro ao incrementar");
+    }
   };
 
-  const handleReset = () => {
-    setStep("select");
-    setSelectedWorkUnits([]);
-    setActiveWorkUnitId(null);
-    setScanStatus("idle");
-    setScanMessage("");
-    queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+  const handleCompleteAll = async () => {
+    const incompleteUnits = myLockedUnits.filter(wu => wu.status !== "concluido");
+    try {
+      for (const wu of incompleteUnits) {
+        await completeWorkUnitMutation.mutateAsync(wu.id);
+      }
+      clearSession();
+      setStep("select");
+      setSelectedWorkUnits([]);
+      setCurrentProductIndex(0);
+      setPickingTab("product");
+      toast({ title: "Separação Concluída!", description: "Todos os itens foram separados com sucesso." });
+    } catch {
+      toast({ title: "Erro", description: "Falha ao concluir. Verifique itens pendentes.", variant: "destructive" });
+    }
+  };
+
+  const handleCancelPicking = () => {
+    const ids = allMyUnits.map(wu => wu.id);
+    if (ids.length > 0) {
+      unlockMutation.mutate({ ids, reset: true });
+    } else {
+      clearSession();
+      setStep("select");
+      setSelectedWorkUnits([]);
+    }
+  };
+
+  const handleNextProduct = () => {
+    const nextIdx = filteredAggregatedProducts.findIndex((ap, idx) => {
+      if (idx <= currentProductIndex) return false;
+      const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
+      return remaining > 0;
+    });
+
+    if (nextIdx >= 0) {
+      setCurrentProductIndex(nextIdx);
+    } else {
+      const wrapIdx = filteredAggregatedProducts.findIndex((ap) => {
+        const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
+        return remaining > 0;
+      });
+      if (wrapIdx >= 0) {
+        setCurrentProductIndex(wrapIdx);
+      }
+    }
+  };
+
+  const getProgress = () => {
+    if (aggregatedProducts.length === 0) return 0;
+    const total = aggregatedProducts.reduce((s, ap) => s + ap.totalQty, 0);
+    const done = aggregatedProducts.reduce((s, ap) => s + ap.separatedQty + ap.exceptionQty, 0);
+    return total > 0 ? (done / total) * 100 : 0;
+  };
+
+  const allItemsComplete = aggregatedProducts.length > 0 && aggregatedProducts.every(ap =>
+    ap.separatedQty + ap.exceptionQty >= ap.totalQty
+  );
+
+  const handleApplyDateFilter = () => {
+    setDateRange(tempDateRange);
   };
 
   return (
-    <div className="min-h-screen bg-background">
-      <GradientHeader
-        title="Separação"
-        subtitle={user?.name}
-      >
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={logout}
-          className="bg-white/10 border-white/20 text-white hover:bg-white/20"
-          data-testid="button-logout"
-        >
-          <LogOut className="h-4 w-4 mr-2" />
+    <div className="min-h-screen bg-background flex flex-col">
+      <header className="flex items-center justify-between px-3 py-2 border-b border-border bg-card">
+        <div className="flex items-center gap-2 min-w-0">
+          <Package className="h-4 w-4 text-primary shrink-0" />
+          <span className="text-sm font-medium truncate">{user?.name}</span>
+        </div>
+        <Button variant="ghost" size="sm" onClick={logout} className="h-8 px-2 text-xs" data-testid="button-logout">
+          <LogOut className="h-3.5 w-3.5 mr-1" />
           Sair
         </Button>
-      </GradientHeader>
+      </header>
 
-      <main className="max-w-2xl mx-auto px-4 py-6 space-y-4">
-        {/* Step Progress */}
-        <div className="flex items-center justify-between text-sm mb-6">
-          <div className={`flex items-center gap-2 ${step === "select" ? "text-primary font-medium" : "text-muted-foreground"}`}>
-            <span className="w-6 h-6 rounded-full bg-primary text-white flex items-center justify-center text-xs">1</span>
-            Selecionar
-          </div>
-          <ChevronRight className="h-4 w-4 text-muted-foreground" />
-          <div className={`flex items-center gap-2 ${step === "scan_cart" ? "text-primary font-medium" : "text-muted-foreground"}`}>
-            <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${step === "scan_cart" || step === "picking" || step === "complete" ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}>2</span>
-            Carrinho
-          </div>
-          <ChevronRight className="h-4 w-4 text-muted-foreground" />
-          <div className={`flex items-center gap-2 ${step === "picking" ? "text-primary font-medium" : "text-muted-foreground"}`}>
-            <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${step === "picking" || step === "complete" ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}>3</span>
-            Separar
-          </div>
-          <ChevronRight className="h-4 w-4 text-muted-foreground" />
-          <div className={`flex items-center gap-2 ${step === "complete" ? "text-primary font-medium" : "text-muted-foreground"}`}>
-            <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${step === "complete" ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}>
-              {step === "complete" ? <Check className="h-3 w-3" /> : "4"}
-            </span>
-            Concluir
-          </div>
-        </div>
-
-        {/* Step: Select Work Units */}
-        {step === "select" && (
-          <SectionCard title="Unidades de Trabalho Disponíveis" icon={<Package className="h-4 w-4 text-primary" />}>
-
-            {/* Filters */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 p-4 bg-muted/30 rounded-lg">
-              <div className="space-y-2">
-                <label className="text-sm font-medium flex items-center gap-2">
-                  <Search className="h-4 w-4" />
-                  Pedido
-                </label>
-                <Input
-                  placeholder="Buscar N° Pedido..."
-                  value={filterOrderId}
-                  onChange={(e) => setFilterOrderId(e.target.value)}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-sm font-medium flex items-center gap-2">
-                  <Calendar className="h-4 w-4" />
-                  Período
-                </label>
-                <DatePickerWithRange
-                  date={dateRange}
-                  onDateChange={setDateRange}
-                  className="w-full"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-sm font-medium flex items-center gap-2">
-                  <Filter className="h-4 w-4" />
-                  Prioridade
-                </label>
-                <Select value={filterPriority} onValueChange={setFilterPriority}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Todas" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">Todas</SelectItem>
-                    <SelectItem value="1">Alta (1)</SelectItem>
-                    <SelectItem value="2">Média (2)</SelectItem>
-                    <SelectItem value="3">Baixa (3)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+      {step === "select" && (
+        <div className="flex-1 overflow-auto px-3 py-3 space-y-3">
+          <div className="space-y-2 p-2.5 bg-muted/30 rounded-lg border border-border">
+            <div className="flex items-center gap-2">
+              <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <Input
+                placeholder="N° Pedido..."
+                value={filterOrderId}
+                onChange={(e) => setFilterOrderId(e.target.value)}
+                className="h-8 text-xs"
+              />
             </div>
-
-            {isLoading ? (
-              <div className="space-y-3">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <Skeleton key={i} className="h-16 w-full rounded-lg" />
-                ))}
+            <div className="flex items-center gap-2">
+              <Calendar className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <div className="flex-1">
+                <DatePickerWithRange
+                  date={tempDateRange}
+                  onDateChange={setTempDateRange}
+                  className="text-xs h-8"
+                />
               </div>
-            ) : availableWorkUnits.length > 0 ? (
-              <div className="space-y-3">
-                {groupedWorkUnits.map((group) => {
-                  const firstWU = group[0];
-                  const groupIds = group.map(g => g.id);
-                  const isSelected = groupIds.every(id => selectedWorkUnits.includes(id));
+              <Button size="sm" className="h-8 px-3 text-xs" onClick={handleApplyDateFilter}>
+                Buscar
+              </Button>
+            </div>
+          </div>
 
-                  // Calculate total filtered items for this group
-                  const totalItems = group.reduce((acc, wu) => {
-                    const filteredItems = wu.items?.filter(item => {
-                      const userSections = (user?.sections as string[]) || [];
-                      return userSections.length === 0 || userSections.includes(item.section);
-                    }) || [];
-                    return acc + filteredItems.length;
-                  }, 0);
+          {isLoading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-14 w-full rounded-lg" />
+              ))}
+            </div>
+          ) : groupedWorkUnits.length > 0 ? (
+            <div className="space-y-1.5">
+              {groupedWorkUnits.map((group) => {
+                const firstWU = group[0];
+                const groupIds = group.map(g => g.id);
+                const isSelected = groupIds.every(id => selectedWorkUnits.includes(id));
 
-                  // Unique points
-                  const points = Array.from(new Set(group.map(wu => wu.pickupPoint))).sort((a, b) => a - b).join(", ");
-                  // Unique sections
-                  const sections = Array.from(new Set(group.map(wu => wu.section).filter(Boolean))).join(", ");
+                const userSections = (user?.sections as string[]) || [];
+                const totalItems = group.reduce((acc, wu) => {
+                  const filtered = wu.items?.filter(item =>
+                    userSections.length === 0 || userSections.includes(item.section)
+                  ) || [];
+                  return acc + filtered.reduce((s, item) => s + Number(item.quantity), 0);
+                }, 0);
 
-                  return (
-                    <div
-                      key={firstWU.orderId}
-                      className="flex items-center gap-4 p-4 rounded-xl border border-border hover:border-primary/30 transition-colors"
-                      data-testid={`order-group-${firstWU.orderId}`}
-                    >
-                      <Checkbox
-                        checked={isSelected}
-                        onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
-                        data-testid={`checkbox-order-${firstWU.orderId}`}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-mono font-semibold">{firstWU.order.erpOrderId}</span>
-                          <StatusBadge status={firstWU.status} />
-                        </div>
-                        <p className="text-sm text-muted-foreground truncate">
-                          {firstWU.order.customerName}
-                          {points && ` • Pontos: ${points}`}
-                          {sections && ` • ${sections}`}
-                        </p>
+                let createdAt = "";
+                try {
+                  createdAt = format(new Date(firstWU.order.createdAt), "dd/MM HH:mm");
+                } catch {}
+
+                return (
+                  <div
+                    key={firstWU.orderId}
+                    className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${isSelected ? "border-primary bg-primary/5" : "border-border"}`}
+                    onClick={() => handleSelectGroup(group, !isSelected)}
+                    data-testid={`order-group-${firstWU.orderId}`}
+                  >
+                    <Checkbox
+                      checked={isSelected}
+                      onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
+                      className="shrink-0"
+                      data-testid={`checkbox-order-${firstWU.orderId}`}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono text-sm font-semibold">{firstWU.order.erpOrderId}</span>
                       </div>
-                      <div className="text-right">
-                        <p className="text-sm font-medium">
-                          {totalItems} itens
-                        </p>
-                      </div>
+                      <p className="text-xs text-muted-foreground truncate">{firstWU.order.customerName}</p>
                     </div>
-                  );
-                })}
+                    <div className="text-right shrink-0">
+                      <p className="text-xs font-medium">{totalItems} itens</p>
+                      <p className="text-[10px] text-muted-foreground">{createdAt}</p>
+                    </div>
+                  </div>
+                );
+              })}
 
-                <Button
-                  className="w-full h-14 text-lg mt-4"
-                  onClick={handleStartSeparation}
-                  disabled={selectedWorkUnits.length === 0 || lockMutation.isPending}
-                  data-testid="button-start-separation"
-                >
-                  <ShoppingCart className="h-5 w-5 mr-2" />
-                  Separar {selectedWorkUnits.length > 0 && `(${(() => {
-                    // Count unique orders instead of work units
-                    const uniqueOrders = new Set(
-                      workUnits
-                        ?.filter(wu => selectedWorkUnits.includes(wu.id))
-                        .map(wu => wu.orderId)
-                    );
-                    return uniqueOrders.size;
-                  })()})`}
-                </Button>
-              </div>
-            ) : (
-              <div className="text-center py-12 text-muted-foreground">
-                <Package className="h-16 w-16 mx-auto mb-4 opacity-40" />
-                <p className="text-lg font-medium">Nenhuma unidade disponível</p>
-                <p className="text-sm">Aguarde novos pedidos ou verifique com o supervisor</p>
+              <Button
+                className="w-full h-11 text-sm mt-3"
+                onClick={handleStartSeparation}
+                disabled={selectedWorkUnits.length === 0 || lockMutation.isPending}
+                data-testid="button-start-separation"
+              >
+                <Package className="h-4 w-4 mr-1.5" />
+                Separar
+                {selectedWorkUnits.length > 0 && ` (${new Set(
+                  workUnits?.filter(wu => selectedWorkUnits.includes(wu.id)).map(wu => wu.orderId)
+                ).size})`}
+              </Button>
+            </div>
+          ) : (
+            <div className="text-center py-10 text-muted-foreground">
+              <Package className="h-12 w-12 mx-auto mb-3 opacity-40" />
+              <p className="text-sm font-medium">Nenhum pedido disponível</p>
+              <p className="text-xs">Aguarde novos pedidos</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {step === "picking" && (
+        <>
+          <div className="px-3 pt-2 pb-1 space-y-1.5 border-b border-border bg-card">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">
+                {allMyUnits.map(wu => wu.order.erpOrderId).filter((v, i, a) => a.indexOf(v) === i).join(", ")}
+              </span>
+              <span className="text-xs font-medium">{Math.round(getProgress())}%</span>
+            </div>
+            <Progress value={getProgress()} className="h-1.5" />
+            <ScanInput
+              placeholder="Leia o código de barras..."
+              onScan={handleScanItem}
+              status={scanStatus}
+              statusMessage={scanMessage}
+              autoFocus
+              className="[&_input]:h-10 [&_input]:text-sm"
+            />
+          </div>
+
+          <div className="flex-1 overflow-auto">
+            {pickingTab === "product" && currentProduct && (
+              <div className="px-3 py-3 space-y-3">
+                <div className="bg-card border border-border rounded-lg p-3 space-y-2.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {currentProduct.orderCodes.map(code => (
+                      <span key={code} className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded font-mono">{code}</span>
+                    ))}
+                  </div>
+
+                  <p className="text-sm font-medium leading-tight">{currentProduct.product.name}</p>
+
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                    <div>
+                      <span className="text-muted-foreground">Código:</span>
+                      <span className="ml-1 font-mono font-medium">{currentProduct.product.erpCode}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Ref:</span>
+                      <span className="ml-1 font-mono">{currentProduct.product.referenceCode || "—"}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Cód. Barras:</span>
+                      <span className="ml-1 font-mono">{currentProduct.product.barcode || "—"}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Caixa:</span>
+                      <span className="ml-1 font-mono">{currentProduct.product.boxBarcode || "Indisponível"}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1 border-t border-border">
+                    <div>
+                      <span className="text-xs text-muted-foreground">Separado</span>
+                      <p className="text-lg font-bold">
+                        {currentProduct.separatedQty}
+                        <span className="text-muted-foreground font-normal text-sm">/{currentProduct.totalQty}</span>
+                        {currentProduct.exceptionQty > 0 && (
+                          <span className="text-orange-500 text-xs ml-1">(-{currentProduct.exceptionQty} exc)</span>
+                        )}
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      className="h-10 w-10 p-0"
+                      onClick={() => handleIncrementProduct(currentProduct)}
+                      disabled={
+                        scanItemMutation.isPending ||
+                        (currentProduct.separatedQty + currentProduct.exceptionQty >= currentProduct.totalQty) ||
+                        !currentProduct.product.barcode
+                      }
+                    >
+                      <Plus className="h-5 w-5" />
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 h-9 text-xs"
+                    onClick={() => {
+                      const firstIncompleteItem = currentProduct.items.find(i =>
+                        Number(i.quantity) > Number(i.separatedQty) + Number(i.exceptionQty || 0)
+                      ) || currentProduct.items[0];
+                      setExceptionItem(firstIncompleteItem);
+                      setShowExceptionDialog(true);
+                    }}
+                  >
+                    <AlertTriangle className="h-3.5 w-3.5 mr-1" />
+                    Exceção
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="flex-1 h-9 text-xs"
+                    onClick={handleNextProduct}
+                  >
+                    Próximo
+                    <ArrowRight className="h-3.5 w-3.5 ml-1" />
+                  </Button>
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 h-9 text-xs text-destructive border-destructive/30 hover:bg-destructive/10"
+                    onClick={handleCancelPicking}
+                    disabled={unlockMutation.isPending}
+                    data-testid="button-cancel-picking"
+                  >
+                    Cancelar
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="flex-1 h-9 text-xs bg-green-600 hover:bg-green-700"
+                    onClick={handleCompleteAll}
+                    disabled={!allItemsComplete || completeWorkUnitMutation.isPending}
+                    data-testid="button-complete-picking"
+                  >
+                    <Check className="h-3.5 w-3.5 mr-1" />
+                    Concluir
+                  </Button>
+                </div>
               </div>
             )}
-          </SectionCard>
-        )}
 
-        {/* Step: Scan Cart */}
-        {step === "scan_cart" && (
-          <SectionCard title="Validar Carrinho" icon={<ShoppingCart className="h-4 w-4 text-primary" />}>
-            <div className="text-center py-4">
-              <ShoppingCart className="h-16 w-16 mx-auto mb-4 text-primary opacity-60" />
-              <p className="text-lg font-medium mb-2">Leia o QR Code do Carrinho</p>
-              <p className="text-sm text-muted-foreground mb-6">
-                Escaneie o código QR do carrinho para iniciar a separação
-              </p>
-              <ScanInput
-                placeholder="Aguardando leitura do QR Code..."
-                onScan={handleScanCart}
-                status={scanStatus}
-                statusMessage={scanMessage}
-                value={cartInputValue}
-                onChange={setCartInputValue}
-              />
-              <div className="flex gap-4 mt-6">
-                <Button
-                  variant="outline"
-                  className="flex-1"
-                  onClick={() => {
-                    if (selectedWorkUnits.length > 0) {
-                      unlockMutation.mutate({ ids: selectedWorkUnits, reset: true });
-                      setCartInputValue("");
-                    } else {
-                      setStep("select");
-                      setSelectedWorkUnits([]);
-                      setCartInputValue("");
-                    }
-                  }}
-                  disabled={unlockMutation.isPending}
-                >
-                  Cancelar
-                </Button>
-                <Button
-                  className="flex-1"
-                  onClick={() => handleScanCart(cartInputValue)}
-                  disabled={!cartInputValue.trim() || scanStatus === "success"}
-                >
-                  Avançar
-                </Button>
+            {pickingTab === "product" && !currentProduct && filteredAggregatedProducts.length === 0 && (
+              <div className="flex items-center justify-center h-40 text-muted-foreground text-sm">
+                Nenhum produto para separar
               </div>
-            </div>
-          </SectionCard>
-        )}
+            )}
 
-        {/* Step: Picking */}
-        {step === "picking" && activeWorkUnit && (
-          <>
-            <SectionCard
-              title={(() => {
-                const myWorkUnits = workUnits?.filter(wu =>
-                  wu.lockedBy === user?.id && wu.status !== "concluido"
-                ) || [];
-                const orderIds = Array.from(new Set(myWorkUnits.map(wu => wu.order.erpOrderId))).join(", ");
-                return `Separando Pedido(s): ${orderIds}`;
-              })()}
-              icon={<Package className="h-4 w-4 text-primary" />}
-            >
-              <div className="mb-4">
-                <div className="flex justify-between text-sm mb-2">
-                  <span>Progresso</span>
-                  <span className="font-medium">{Math.round(getProgress())}%</span>
-                </div>
-                <Progress value={getProgress()} className="h-2" />
-              </div>
+            {pickingTab === "list" && (
+              <div className="px-3 py-3 space-y-2">
+                {availableSections.length > 1 && (
+                  <Select value={sectionFilter} onValueChange={setSectionFilter}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue placeholder="Todas as seções" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Todas as seções</SelectItem>
+                      {availableSections.map(s => (
+                        <SelectItem key={s} value={s}>{s}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
 
-              <ScanInput
-                placeholder="Leia o código de barras do produto..."
-                onScan={handleScanItem}
-                status={scanStatus}
-                statusMessage={scanMessage}
-                autoFocus
-              />
-            </SectionCard>
+                {filteredAggregatedProducts.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground text-xs">
+                    Nenhum produto encontrado
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {filteredAggregatedProducts.map((ap, idx) => {
+                      const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
+                      const isComplete = remaining <= 0;
+                      const hasException = ap.exceptionQty > 0;
 
-            <SectionCard title="Itens a Separar" icon={<Package className="h-4 w-4 text-primary" />}>
-              <div className="mb-2 flex justify-end">
-                <span className="text-[10px] font-semibold bg-primary/10 text-primary px-2 py-1 rounded-full border border-primary/20">
-                  Modo Agrupado por Produto
-                </span>
-              </div>
-              <div className="space-y-3">
-                {(() => {
-                  // Get all work units locked by this user
-                  const myWorkUnits = workUnits?.filter(wu =>
-                    wu.lockedBy === user?.id
-                  ) || [];
-
-                  // Combine all items from all locked work units
-                  const allItems: ItemWithProduct[] = myWorkUnits.flatMap(wu =>
-                    (wu.items as ItemWithProduct[]) || []
-                  );
-
-                  // Filter by user's sections
-                  const userSections = (user?.sections as string[]) || [];
-                  const filteredItems = allItems.filter(item =>
-                    userSections.length === 0 || userSections.includes(item.section)
-                  );
-
-                  // Aggregate items by product
-                  const aggregatedItems = filteredItems.reduce((acc, item) => {
-                    const productId = item.productId;
-                    if (!acc[productId]) {
-                      acc[productId] = {
-                        product: item.product,
-                        totalQty: 0,
-                        separatedQty: 0,
-                        exceptionQty: 0,
-                        items: []
-                      };
-                    }
-                    acc[productId].totalQty += Number(item.quantity);
-                    acc[productId].separatedQty += Number(item.separatedQty);
-                    acc[productId].exceptionQty += Number(item.exceptionQty || 0);
-                    acc[productId].items.push(item);
-                    return acc;
-                  }, {} as Record<string, {
-                    product: Product;
-                    totalQty: number;
-                    separatedQty: number;
-                    exceptionQty: number;
-                    items: ItemWithProduct[];
-                  }>);
-
-                  return Object.values(aggregatedItems).map((group) => {
-                    const remaining = group.totalQty - group.separatedQty - group.exceptionQty;
-                    const isComplete = remaining <= 0;
-                    const hasException = group.exceptionQty > 0;
-                    const productId = group.product.id;
-
-                    // Find first incomplete item for exception handling shortcut
-                    const firstIncompleteItem = group.items.find(i =>
-                      Number(i.quantity) > Number(i.separatedQty) + Number(i.exceptionQty || 0)
-                    ) || group.items[0];
-
-                    return (
-                      <div
-                        key={productId}
-                        className={`flex items-center gap-3 p-3 rounded-lg border transition-all duration-500 ${group.items.some(i => lastScannedItemId === i.id)
-                          ? "ring-2 ring-primary scale-[1.02] bg-primary/5 shadow-lg z-10"
-                          : isComplete
-                            ? hasException
-                              ? "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-900"
-                              : "bg-green-50 border-green-200 dark:bg-green-950/30 dark:border-green-900"
-                            : hasException
-                              ? "bg-amber-50/50 border-amber-100 dark:border-amber-900/50"
-                              : "border-border"
+                      return (
+                        <div
+                          key={ap.product.id}
+                          className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-colors ${
+                            isComplete
+                              ? hasException
+                                ? "bg-amber-50/50 border-amber-200 dark:bg-amber-950/20 dark:border-amber-900/50"
+                                : "bg-green-50/50 border-green-200 dark:bg-green-950/20 dark:border-green-900/50"
+                              : "border-border hover:bg-muted/50"
                           }`}
-                        data-testid={`item-group-${productId}`}
-                        id={`item-group-${productId}`}
-                      >
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center ${isComplete
-                          ? hasException ? "bg-amber-500 text-white" : "bg-green-500 text-white"
-                          : "bg-muted"
+                          onClick={() => {
+                            setCurrentProductIndex(idx);
+                            setPickingTab("product");
+                          }}
+                        >
+                          <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
+                            isComplete
+                              ? hasException ? "bg-amber-500 text-white" : "bg-green-500 text-white"
+                              : "bg-muted"
                           }`}>
-                          {isComplete ? (
-                            <Check className="h-4 w-4" />
-                          ) : (
-                            <span className="text-sm font-medium">{remaining}</span>
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="font-medium truncate">{group.product.name}</p>
-                          <div className="text-xs text-muted-foreground flex items-center gap-2">
-                            <div className="flex flex-col gap-1">
-                              <span>SKU: {group.product.erpCode}</span>
-                              <span>Unit: {group.product.barcode || "S/N"}</span>
+                            {isComplete ? (
+                              hasException ? <AlertTriangle className="h-3 w-3" /> : <Check className="h-3 w-3" />
+                            ) : (
+                              <span className="text-[10px] font-medium">{remaining}</span>
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-medium truncate">{ap.product.name}</p>
+                            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                              <span className="font-mono">{ap.product.erpCode}</span>
+                              <span>•</span>
+                              <span className="font-mono">{ap.product.barcode || "—"}</span>
                             </div>
-                            {isComplete && (
-                              hasException
-                                ? <span className="font-bold text-amber-600 dark:text-amber-400">COM EXCEÇÃO</span>
-                                : <span className="font-bold text-green-600 dark:text-green-400">SEPARADO</span>
+                            <div className="flex items-center gap-1 mt-0.5">
+                              {ap.orderCodes.map(code => (
+                                <span key={code} className="text-[9px] bg-muted px-1 py-0.5 rounded font-mono">{code}</span>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="text-xs font-medium">
+                              {ap.separatedQty}/{ap.totalQty}
+                            </p>
+                            {ap.exceptionQty > 0 && (
+                              <span className="text-[10px] text-orange-500">-{ap.exceptionQty}</span>
                             )}
                           </div>
                         </div>
-                        <div className="text-right">
-                          <p className="text-sm font-medium">
-                            {group.separatedQty}/{group.totalQty} {group.product.unit}
-                            {group.exceptionQty > 0 && (
-                              <span className="text-orange-600 dark:text-orange-400"> -{group.exceptionQty}</span>
-                            )}
-                          </p>
-                          {group.items.length > 1 && (
-                            <span className="text-[10px] text-muted-foreground block mt-1">
-                              {group.items.length} pedidos agrupados
-                            </span>
-                          )}
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-8 w-8 p-0"
-                          onClick={() => {
-                            setExceptionItem(firstIncompleteItem);
-                            setShowExceptionDialog(true);
-                          }}
-                          data-testid={`button-exception-${productId}`}
-                        >
-                          <AlertTriangle className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    );
-                  });
-                })()}
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="flex gap-2 pt-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 h-9 text-xs text-destructive border-destructive/30 hover:bg-destructive/10"
+                    onClick={handleCancelPicking}
+                    disabled={unlockMutation.isPending}
+                  >
+                    Cancelar
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="flex-1 h-9 text-xs bg-green-600 hover:bg-green-700"
+                    onClick={handleCompleteAll}
+                    disabled={!allItemsComplete || completeWorkUnitMutation.isPending}
+                  >
+                    <Check className="h-3.5 w-3.5 mr-1" />
+                    Concluir
+                  </Button>
+                </div>
               </div>
+            )}
+          </div>
 
-              <div className="flex gap-2 mt-4">
-                <Button
-                  variant="outline"
-                  className="flex-1"
-                  onClick={() => {
-                    // Get all locked units for this user (Multi-Order)
-                    const myWorkUnits = workUnits?.filter(wu => wu.lockedBy === user?.id) || [];
-                    const ids = myWorkUnits.length > 0 ? myWorkUnits.map(wu => wu.id) : (activeWorkUnit ? [activeWorkUnit.id] : []);
-
-                    if (ids.length > 0) {
-                      unlockMutation.mutate({ ids, reset: true });
-                    }
-                  }}
-                  disabled={unlockMutation.isPending}
-                  data-testid="button-cancel-picking"
-                >
-                  Cancelar
-                </Button>
-                <Button
-                  className="flex-1"
-                  onClick={() => {
-                    if (activeWorkUnit && activeWorkUnit.status !== "concluido") {
-                      completeWorkUnitMutation.mutate(activeWorkUnit.id);
-                    } else {
-                      setStep("complete");
-                    }
-                  }}
-                  disabled={(() => {
-                    if (!activeWorkUnit) return true;
-                    if (completeWorkUnitMutation.isPending) return true;
-                    if (activeWorkUnit.status === "concluido") return false;
-
-                    const itemsReady = activeWorkUnit.items.every(item => {
-                      const excQty = (item as any).exceptionQty || 0;
-                      const sepQty = Number(item.separatedQty);
-                      return (sepQty + excQty) >= Number(item.quantity);
-                    });
-                    return !itemsReady;
-                  })()}
-                  data-testid="button-complete-picking"
-                >
-                  Concluir Separação
-                </Button>
-              </div>
-            </SectionCard>
-          </>
-        )}
-
-        {/* Step: Complete */}
-        {step === "complete" && (
-          <SectionCard>
-            <div className="text-center py-8">
-              <div className="w-20 h-20 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center mx-auto mb-4">
-                <Check className="h-10 w-10 text-green-600 dark:text-green-400" />
-              </div>
-              <h2 className="text-2xl font-bold mb-2">Separação Concluída!</h2>
-              <p className="text-muted-foreground mb-6">
-                Todos os itens foram separados com sucesso.
-              </p>
-              <Button onClick={handleReset} className="w-full h-12" data-testid="button-new-separation">
-                Nova Separação
-              </Button>
-            </div>
-          </SectionCard>
-        )}
-      </main>
+          <nav className="flex border-t border-border bg-card shrink-0">
+            <button
+              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${
+                pickingTab === "product" ? "text-primary bg-primary/5" : "text-muted-foreground"
+              }`}
+              onClick={() => setPickingTab("product")}
+            >
+              <Package className="h-5 w-5" />
+              <span className="text-[10px] font-medium">Produto</span>
+            </button>
+            <button
+              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${
+                pickingTab === "list" ? "text-primary bg-primary/5" : "text-muted-foreground"
+              }`}
+              onClick={() => setPickingTab("list")}
+            >
+              <List className="h-5 w-5" />
+              <span className="text-[10px] font-medium">Lista</span>
+            </button>
+          </nav>
+        </>
+      )}
 
       <ResultDialog
         open={showResultDialog}
@@ -988,7 +943,6 @@ export default function SeparacaoPage() {
         type={resultDialogConfig.type}
         title={resultDialogConfig.title}
         message={resultDialogConfig.message}
-        onAction={step === "complete" ? handleReset : undefined}
       />
 
       {exceptionItem && (
@@ -999,9 +953,10 @@ export default function SeparacaoPage() {
           maxQuantity={Math.max(0, Number(exceptionItem.quantity) - Number(exceptionItem.separatedQty) - (exceptionItem.exceptionQty || 0))}
           hasExceptions={(exceptionItem.exceptionQty || 0) > 0}
           onSubmit={(data) => {
-            if (activeWorkUnit) {
+            const wu = allMyUnits.find(w => w.items.some(i => i.id === exceptionItem.id));
+            if (wu) {
               createExceptionMutation.mutate({
-                workUnitId: activeWorkUnit.id,
+                workUnitId: wu.id,
                 orderItemId: exceptionItem.id,
                 ...data,
               });

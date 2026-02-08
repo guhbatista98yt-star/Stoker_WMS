@@ -84,18 +84,18 @@ export async function seedDatabase() {
 
   // Create products
   const productsSeed = [
-    { erpCode: "P001", barcode: "7891234567890", name: "Arroz Tipo 1 5kg", section: "Mercearia", pickupPoint: 1, unit: "UN", price: "24.90", stockQty: "100" },
-    { erpCode: "P002", barcode: "7891234567891", name: "Feijão Carioca 1kg", section: "Mercearia", pickupPoint: 1, unit: "UN", price: "8.90", stockQty: "100" },
-    { erpCode: "P003", barcode: "7891234567892", name: "Óleo de Soja 900ml", section: "Mercearia", pickupPoint: 1, unit: "UN", price: "7.50", stockQty: "100" },
-    { erpCode: "P004", barcode: "7891234567893", name: "Açúcar Cristal 1kg", section: "Mercearia", pickupPoint: 2, unit: "UN", price: "5.90", stockQty: "100" },
-    { erpCode: "P005", barcode: "7891234567894", name: "Café Torrado 500g", section: "Mercearia", pickupPoint: 2, unit: "UN", price: "18.90", stockQty: "100" },
-    { erpCode: "P006", barcode: "7891234567895", name: "Leite Integral 1L", section: "Laticínios", pickupPoint: 3, unit: "UN", price: "5.50", stockQty: "100" },
-    { erpCode: "P007", barcode: "7891234567896", name: "Queijo Mussarela 500g", section: "Laticínios", pickupPoint: 3, unit: "UN", price: "32.90", stockQty: "100" },
-    { erpCode: "P008", barcode: "7891234567897", name: "Manteiga 200g", section: "Laticínios", pickupPoint: 3, unit: "UN", price: "12.90", stockQty: "100" },
-    { erpCode: "P009", barcode: "7891234567898", name: "Refrigerante Cola 2L", section: "Bebidas", pickupPoint: 4, unit: "UN", price: "9.90", stockQty: "100" },
-    { erpCode: "P010", barcode: "7891234567899", name: "Suco de Laranja 1L", section: "Bebidas", pickupPoint: 4, unit: "UN", price: "8.90", stockQty: "100" },
-    { erpCode: "P011", barcode: "7891234567900", name: "Água Mineral 500ml", section: "Bebidas", pickupPoint: 4, unit: "UN", price: "2.50", stockQty: "100" },
-    { erpCode: "P012", barcode: "7891234567901", name: "Sabão em Pó 1kg", section: "Limpeza", pickupPoint: 5, unit: "UN", price: "14.90", stockQty: "100" },
+    { erpCode: "P001", referenceCode: "REF-001", barcode: "7891234567890", boxBarcode: "DUN7891234567890", name: "Arroz Tipo 1 5kg", section: "Mercearia", pickupPoint: 1, unit: "UN", price: "24.90", stockQty: "100" },
+    { erpCode: "P002", referenceCode: "REF-002", barcode: "7891234567891", boxBarcode: "DUN7891234567891", name: "Feijão Carioca 1kg", section: "Mercearia", pickupPoint: 1, unit: "UN", price: "8.90", stockQty: "100" },
+    { erpCode: "P003", referenceCode: "REF-003", barcode: "7891234567892", boxBarcode: null, name: "Óleo de Soja 900ml", section: "Mercearia", pickupPoint: 1, unit: "UN", price: "7.50", stockQty: "100" },
+    { erpCode: "P004", referenceCode: "REF-004", barcode: "7891234567893", boxBarcode: "DUN7891234567893", name: "Açúcar Cristal 1kg", section: "Mercearia", pickupPoint: 2, unit: "UN", price: "5.90", stockQty: "100" },
+    { erpCode: "P005", referenceCode: "REF-005", barcode: "7891234567894", boxBarcode: null, name: "Café Torrado 500g", section: "Mercearia", pickupPoint: 2, unit: "UN", price: "18.90", stockQty: "100" },
+    { erpCode: "P006", referenceCode: "REF-006", barcode: "7891234567895", boxBarcode: "DUN7891234567895", name: "Leite Integral 1L", section: "Laticínios", pickupPoint: 3, unit: "UN", price: "5.50", stockQty: "100" },
+    { erpCode: "P007", referenceCode: "REF-007", barcode: "7891234567896", boxBarcode: null, name: "Queijo Mussarela 500g", section: "Laticínios", pickupPoint: 3, unit: "UN", price: "32.90", stockQty: "100" },
+    { erpCode: "P008", referenceCode: "REF-008", barcode: "7891234567897", boxBarcode: "DUN7891234567897", name: "Manteiga 200g", section: "Laticínios", pickupPoint: 3, unit: "UN", price: "12.90", stockQty: "100" },
+    { erpCode: "P009", referenceCode: "REF-009", barcode: "7891234567898", boxBarcode: null, name: "Refrigerante Cola 2L", section: "Bebidas", pickupPoint: 4, unit: "UN", price: "9.90", stockQty: "100" },
+    { erpCode: "P010", referenceCode: "REF-010", barcode: "7891234567899", boxBarcode: "DUN7891234567899", name: "Suco de Laranja 1L", section: "Bebidas", pickupPoint: 4, unit: "UN", price: "8.90", stockQty: "100" },
+    { erpCode: "P011", referenceCode: "REF-011", barcode: "7891234567900", boxBarcode: null, name: "Água Mineral 500ml", section: "Bebidas", pickupPoint: 4, unit: "UN", price: "2.50", stockQty: "100" },
+    { erpCode: "P012", referenceCode: "REF-012", barcode: "7891234567901", boxBarcode: "DUN7891234567901", name: "Sabão em Pó 1kg", section: "Limpeza", pickupPoint: 5, unit: "UN", price: "14.90", stockQty: "100" },
   ];
 
   const productsData = productsSeed.map((p) => ({
