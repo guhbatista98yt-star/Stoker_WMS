@@ -81,6 +81,23 @@ Tables defined in `shared/schema.ts`:
 - `@tanstack/react-query` - Server state management
 - Full Radix UI primitive suite via shadcn/ui components
 
+### Real-Time Updates (SSE)
+- Server-Sent Events via `/api/sse` endpoint
+- Event types: `picking_started`, `item_picked`, `picking_finished`, `conference_started`, `conference_finished`, `exception_created`, `lock_acquired`, `lock_released`, `work_unit_created`, `picking_update`
+- Supervisor Orders page subscribes to all events for instant updates
+- Conference page subscribes to all events for work unit availability updates
+- Separation page uses polling (refetchInterval: 1000ms) for real-time data
+
 ### Development Tools
 - `@replit/vite-plugin-runtime-error-modal` - Runtime error display
 - `@replit/vite-plugin-cartographer` - Development navigation (Replit-specific)
+
+## Recent Changes
+
+### February 8, 2026
+- Migrated database from SQLite (better-sqlite3) to PostgreSQL using pg driver and Drizzle ORM
+- Schema updated: sqliteTable to pgTable, real to doublePrecision, JSON columns now use jsonb, boolean uses native pg boolean, serial for auto-increment IDs
+- Supervisor Orders page: standardized period filter (De/Ate + Buscar button), removed pendente_conferencia and finalizado from status filter, updated table header to Status Sep./Conf.
+- Enhanced SSE broadcasting: added picking_started, item_picked, picking_finished, conference_started, conference_finished, exception_created events across backend routes
+- Conference page: enhanced SSE subscriptions for real-time work unit updates, scan-pallet now updates order status to em_conferencia
+- Fixed Windows line endings (CRLF to LF) across all TypeScript files

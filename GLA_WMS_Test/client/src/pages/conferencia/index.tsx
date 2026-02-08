@@ -79,13 +79,12 @@ export default function ConferenciaPage() {
   });
 
   const handleSSEMessage = useCallback((type: string, data: any) => {
-    // Invalidate on new work unit or status change
-    if (['work_unit_created', 'picking_update', 'lock_acquired', 'lock_released'].includes(type)) {
+    if (['work_unit_created', 'picking_update', 'lock_acquired', 'lock_released', 'picking_finished', 'conference_started', 'conference_finished', 'exception_created'].includes(type)) {
       queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
     }
   }, [queryClient, workUnitsQueryKey]);
 
-  useSSE('/api/sse', ['work_unit_created', 'picking_update', 'lock_acquired', 'lock_released'], handleSSEMessage);
+  useSSE('/api/sse', ['work_unit_created', 'picking_update', 'lock_acquired', 'lock_released', 'picking_finished', 'conference_started', 'conference_finished', 'exception_created'], handleSSEMessage);
 
   const availableWorkUnits = workUnits?.filter(
     (wu) => wu.type === "conferencia" && wu.status === "pendente" && !wu.lockedBy
