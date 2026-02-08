@@ -3,12 +3,12 @@ import { createServer, type Server } from "http";
 import cookieParser from "cookie-parser";
 import { storage } from "./storage";
 import { hashPassword, verifyPassword, createAuthSession, isAuthenticated, requireRole, getTokenFromRequest, getUserFromToken } from "./auth";
-import { loginSchema, insertRouteSchema } from "@shared/schema";
+import { loginSchema, insertRouteSchema, orderItems, pickingSessions } from "@shared/schema";
 import { z } from "zod";
 import { exec } from "child_process";
 import path from "path";
 import { setupSSE, broadcastSSE } from "./sse";
-import { pickingSessions } from "@shared/schema";
+import { db } from "./db";
 
 const LOCK_TTL_MINUTES = 15;
 
@@ -346,6 +346,16 @@ export async function registerRoutes(
       }
     } catch (error) {
       console.error("Update user error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.get("/api/pickup-points", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const result = await db.selectDistinct({ pickupPoint: orderItems.pickupPoint }).from(orderItems).orderBy(orderItems.pickupPoint);
+      res.json(result.map(r => r.pickupPoint));
+    } catch (error) {
+      console.error("Get pickup points error:", error);
       res.status(500).json({ error: "Erro interno" });
     }
   });
