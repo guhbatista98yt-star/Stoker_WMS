@@ -777,32 +777,34 @@ export default function SeparacaoPage() {
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
-                      {hasMultiplierPermission && manualQtyAllowed[currentProduct.product.id] && (
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs text-muted-foreground">×</span>
-                          <Input
-                            type="number"
-                            min={1}
-                            max={currentProduct.totalQty - currentProduct.separatedQty - currentProduct.exceptionQty}
-                            value={multiplierValue}
-                            onChange={(e) => setMultiplierValue(Math.max(1, parseInt(e.target.value) || 1))}
-                            className="h-10 w-16 text-center text-sm font-bold"
-                          />
-                        </div>
-                      )}
-                      {hasManualQtyPermission && manualQtyAllowed[currentProduct.product.id] && (
-                        <Button
-                          size="sm"
-                          className="h-10 w-10 p-0"
-                          onClick={() => handleIncrementProduct(currentProduct, multiplierValue)}
-                          disabled={
-                            scanItemMutation.isPending ||
-                            (currentProduct.separatedQty + currentProduct.exceptionQty >= currentProduct.totalQty) ||
-                            !currentProduct.product.barcode
-                          }
-                        >
-                          <Plus className="h-5 w-5" />
-                        </Button>
+                      {(hasManualQtyPermission || hasMultiplierPermission) && manualQtyAllowed[currentProduct.product.id] && (
+                        <>
+                          <div className="flex items-center gap-1">
+                            <span className="text-xs text-muted-foreground">Qtd:</span>
+                            <Input
+                              type="number"
+                              min={1}
+                              max={currentProduct.totalQty - currentProduct.separatedQty - currentProduct.exceptionQty}
+                              value={multiplierValue}
+                              onChange={(e) => setMultiplierValue(Math.max(1, parseInt(e.target.value) || 1))}
+                              className="h-10 w-20 text-center text-sm font-bold"
+                              disabled={!hasMultiplierPermission}
+                            />
+                          </div>
+                          <Button
+                            size="sm"
+                            className="h-10 px-3"
+                            onClick={() => handleIncrementProduct(currentProduct, multiplierValue)}
+                            disabled={
+                              scanItemMutation.isPending ||
+                              (currentProduct.separatedQty + currentProduct.exceptionQty >= currentProduct.totalQty) ||
+                              !currentProduct.product.barcode
+                            }
+                          >
+                            <Plus className="h-5 w-5 mr-1" />
+                            Separar
+                          </Button>
+                        </>
                       )}
                     </div>
                   </div>
