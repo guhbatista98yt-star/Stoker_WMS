@@ -24,14 +24,17 @@ import {
   Plus,
   ArrowRight,
   Calendar,
+  Truck,
+  Lock,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { WorkUnitWithDetails, OrderItem, Product, ExceptionType, UserSettings } from "@shared/schema";
 import { ExceptionDialog } from "@/components/orders/exception-dialog";
 import { getCurrentWeekRange } from "@/lib/date-utils";
 import { format } from "date-fns";
 
-type ConferenciaStep = "select" | "scan_cart" | "checking";
+type ConferenciaStep = "select" | "checking";
 type CheckingTab = "product" | "list";
 
 const STORAGE_KEY = "wms:conferencia-session";
@@ -110,6 +113,7 @@ export default function ConferenciaPage() {
   const [exceptionItem, setExceptionItem] = useState<ItemWithProduct | null>(null);
 
   const [filterOrderId, setFilterOrderId] = useState("");
+  const [filterRoute, setFilterRoute] = useState<string>("");
   const [dateRange, setDateRange] = useState<DateRange | undefined>(getCurrentWeekRange());
   const [tempDateRange, setTempDateRange] = useState<DateRange | undefined>(getCurrentWeekRange());
 
@@ -122,10 +126,15 @@ export default function ConferenciaPage() {
   const hasMultiplierPermission = !!userSettings.allowMultiplier;
 
   const workUnitsQueryKey = useSessionQueryKey(["/api/work-units", "conferencia"]);
+  const routesQueryKey = useSessionQueryKey(["/api/routes"]);
 
   const { data: workUnits, isLoading } = useQuery<WorkUnitWithDetails[]>({
     queryKey: workUnitsQueryKey,
     refetchInterval: 1000,
+  });
+
+  const { data: routes } = useQuery<{id: string; code: string; name: string}[]>({
+    queryKey: routesQueryKey,
   });
 
   const handleSSEMessage = useCallback((type: string, _data: any) => {
@@ -156,7 +165,7 @@ export default function ConferenciaPage() {
 
   const aggregatedProducts = useMemo((): AggregatedProduct[] => {
     const units = allMyUnits.length > 0 ? allMyUnits : [];
-    const allItems: ItemWithProduct[] = units.flatMap(wu => (wu.items as ItemWithProduct[]) || []);
+    const allItems: ItemWithProduct[] = units.flatMap(wu => (wu.items as ItemWithProduct[]) || []).filter(item => Number(item.separatedQty) > 0);
 
     const map: Record<string, AggregatedProduct> = {};
     allItems.forEach(item => {
@@ -266,16 +275,6 @@ export default function ConferenciaPage() {
     },
   });
 
-  const scanPalletMutation = useMutation({
-    mutationFn: async ({ workUnitId, qrCode }: { workUnitId: string; qrCode: string }) => {
-      const res = await apiRequest("POST", `/api/work-units/${workUnitId}/scan-pallet`, { qrCode });
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
-    },
-  });
-
   const unlockMutation = useMutation({
     mutationFn: async (data: string[] | { ids: string[], reset: boolean }) => {
       const body = Array.isArray(data)
@@ -371,9 +370,9 @@ export default function ConferenciaPage() {
       if (orderStatus !== "separado" && orderStatus !== "em_conferencia") return false;
       if (!wu.order.isLaunched) return false;
       if (wu.status === "concluido") return false;
-      if (wu.lockedBy && wu.lockedBy !== user?.id) return false;
-
       if (filterOrderId && !wu.order.erpOrderId.toLowerCase().includes(filterOrderId.toLowerCase())) return false;
+
+      if (filterRoute && wu.order.routeId !== filterRoute) return false;
 
       if (dateRange?.from) {
         const orderDate = new Date(wu.order.createdAt);
@@ -390,7 +389,7 @@ export default function ConferenciaPage() {
 
       return true;
     }) || [];
-  }, [workUnits, user, filterOrderId, dateRange]);
+  }, [workUnits, user, filterOrderId, filterRoute, dateRange]);
 
   const groupedWorkUnits = useMemo(() => {
     const groups: Record<string, typeof availableWorkUnits> = {};
@@ -402,7 +401,9 @@ export default function ConferenciaPage() {
   }, [availableWorkUnits]);
 
   const handleSelectGroup = (wus: typeof availableWorkUnits, checked: boolean) => {
-    const ids = wus.map((wu) => wu.id);
+    const safeWus = wus.filter(wu => !wu.lockedBy || wu.lockedBy === user?.id);
+    const ids = safeWus.map((wu) => wu.id);
+    if (ids.length === 0) return;
     if (checked) {
       setSelectedWorkUnits((prev) => Array.from(new Set([...prev, ...ids])));
     } else {
@@ -417,34 +418,13 @@ export default function ConferenciaPage() {
     }
     try {
       await lockMutation.mutateAsync(selectedWorkUnits);
-      setStep("scan_cart");
+      setStep("checking");
+      setCheckingTab("product");
+      setCurrentProductIndex(0);
       setScanStatus("idle");
       setScanMessage("");
     } catch {
       toast({ title: "Erro", description: "Falha ao bloquear unidades de trabalho", variant: "destructive" });
-    }
-  };
-
-  const handleScanCart = async (qrCode: string) => {
-    const units = allMyUnits.length > 0 ? allMyUnits : selectedWorkUnits.map(id => workUnits?.find(wu => wu.id === id)).filter(Boolean) as WorkUnitWithDetails[];
-    if (units.length === 0) return;
-
-    try {
-      for (const wu of units) {
-        await scanPalletMutation.mutateAsync({ workUnitId: wu.id, qrCode });
-      }
-      setScanStatus("success");
-      setScanMessage("Cesto/carrinho registrado!");
-      setTimeout(() => {
-        setStep("checking");
-        setCheckingTab("product");
-        setCurrentProductIndex(0);
-        setScanStatus("idle");
-        setScanMessage("");
-      }, 800);
-    } catch {
-      setScanStatus("error");
-      setScanMessage("Erro ao registrar cesto/carrinho");
     }
   };
 
@@ -512,12 +492,10 @@ export default function ConferenciaPage() {
   const globalScanHandler = useCallback((barcode: string) => {
     if (step === "checking") {
       handleScanItem(barcode);
-    } else if (step === "scan_cart") {
-      handleScanCart(barcode);
     }
   }, [step, handleScanItem]);
 
-  useBarcodeScanner(globalScanHandler, step === "checking" || step === "scan_cart");
+  useBarcodeScanner(globalScanHandler, step === "checking");
 
   const handleIncrementProduct = async (ap: AggregatedProduct, qty: number = 1) => {
     const remaining = ap.totalSeparatedQty - ap.checkedQty - ap.exceptionQty;
@@ -663,6 +641,20 @@ export default function ConferenciaPage() {
                 Buscar
               </Button>
             </div>
+            <div className="flex items-center gap-2">
+              <Truck className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <Select value={filterRoute} onValueChange={(val) => setFilterRoute(val === "__all__" ? "" : val)}>
+                <SelectTrigger className="h-8 text-xs flex-1">
+                  <SelectValue placeholder="Todas as rotas" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">Todas as rotas</SelectItem>
+                  {routes?.map(route => (
+                    <SelectItem key={route.id} value={route.id}>{route.code} - {route.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           {isLoading ? (
@@ -677,6 +669,8 @@ export default function ConferenciaPage() {
                 const firstWU = group[0];
                 const groupIds = group.map(g => g.id);
                 const isSelected = groupIds.every(id => selectedWorkUnits.includes(id));
+                const lockedByOther = group.some(wu => wu.lockedBy && wu.lockedBy !== user?.id);
+                const lockerName = group.find(wu => wu.lockedBy && wu.lockedBy !== user?.id)?.lockedByName;
 
                 const totalItems = group.reduce((acc, wu) => {
                   const items = wu.items || [];
@@ -688,24 +682,41 @@ export default function ConferenciaPage() {
                   createdAt = format(new Date(firstWU.order.createdAt), "dd/MM HH:mm");
                 } catch {}
 
+                const routeName = routes?.find(r => r.id === firstWU.order.routeId)?.name;
+
                 return (
                   <div
                     key={firstWU.orderId}
-                    className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${isSelected ? "border-primary bg-primary/5" : "border-border"}`}
-                    onClick={() => handleSelectGroup(group, !isSelected)}
+                    className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${
+                      lockedByOther
+                        ? "opacity-50 cursor-not-allowed border-border"
+                        : isSelected ? "border-primary bg-primary/5" : "border-border"
+                    }`}
+                    onClick={() => !lockedByOther && handleSelectGroup(group, !isSelected)}
                     data-testid={`order-group-${firstWU.orderId}`}
                   >
-                    <Checkbox
-                      checked={isSelected}
-                      onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
-                      className="shrink-0"
-                      data-testid={`checkbox-order-${firstWU.orderId}`}
-                    />
+                    {lockedByOther ? (
+                      <Lock className="h-4 w-4 text-muted-foreground shrink-0" />
+                    ) : (
+                      <Checkbox
+                        checked={isSelected}
+                        onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
+                        className="shrink-0"
+                        data-testid={`checkbox-order-${firstWU.orderId}`}
+                      />
+                    )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
                         <span className="font-mono text-sm font-semibold">{firstWU.order.erpOrderId}</span>
+                        {routeName && <span className="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded font-medium">Rota: {routeName}</span>}
                       </div>
                       <p className="text-xs text-muted-foreground truncate">{firstWU.order.customerName}</p>
+                      {lockedByOther && (
+                        <p className="text-[10px] text-orange-600 font-medium flex items-center gap-1 mt-0.5">
+                          <Lock className="h-3 w-3" />
+                          Em conferência por: {lockerName || "outro usuário"}
+                        </p>
+                      )}
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-xs font-medium">{totalItems} itens</p>
@@ -735,45 +746,6 @@ export default function ConferenciaPage() {
               <p className="text-xs">Aguarde a conclusão das separações</p>
             </div>
           )}
-        </div>
-      )}
-
-      {step === "scan_cart" && (
-        <div className="flex-1 flex items-center justify-center px-4">
-          <div className="w-full max-w-md space-y-6 text-center">
-            <div className="space-y-2">
-              <div className="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
-                <ClipboardCheck className="h-10 w-10 text-primary" />
-              </div>
-              <h2 className="text-lg font-semibold">Leia o Cesto/Carrinho</h2>
-              <p className="text-sm text-muted-foreground">
-                Escaneie o código do cesto ou carrinho para iniciar a conferência
-              </p>
-            </div>
-            <ScanInput
-              placeholder="Leia o código do cesto/carrinho..."
-              onScan={handleScanCart}
-              status={scanStatus}
-              statusMessage={scanMessage}
-              autoFocus
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                const ids = allMyUnits.map(wu => wu.id);
-                if (ids.length > 0) {
-                  unlockMutation.mutate({ ids, reset: true });
-                } else {
-                  setStep("select");
-                  setSelectedWorkUnits([]);
-                }
-              }}
-              className="text-xs"
-            >
-              Cancelar
-            </Button>
-          </div>
         </div>
       )}
 

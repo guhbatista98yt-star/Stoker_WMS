@@ -21,6 +21,7 @@ import SeparacaoPage from "@/pages/separacao/index";
 import ConferenciaPage from "@/pages/conferencia/index";
 import BalcaoPage from "@/pages/balcao/index";
 import PickingPage from "@/pages/handheld/picking";
+import FilaPedidosPage from "@/pages/fila-pedidos/index";
 import NotFound from "@/pages/not-found";
 import { Loader2 } from "lucide-react";
 
@@ -163,6 +164,12 @@ function Router() {
       <Route path="/handheld/picking">
         <ProtectedRoute allowedRoles={["separacao", "administrador"]}>
           <PickingPage />
+        </ProtectedRoute>
+      </Route>
+
+      <Route path="/fila-pedidos">
+        <ProtectedRoute allowedRoles={["fila_pedidos", "supervisor", "administrador"]}>
+          <FilaPedidosPage />
         </ProtectedRoute>
       </Route>
 

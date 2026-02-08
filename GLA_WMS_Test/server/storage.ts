@@ -457,7 +457,7 @@ export class DatabaseStorage implements IStorage {
 
   // Work Units
   // Work Units
-  async getWorkUnits(type?: string): Promise<(WorkUnit & { order: Order; items: (OrderItem & { product: Product; exceptionQty?: number })[] })[]> {
+  async getWorkUnits(type?: string): Promise<(WorkUnit & { order: Order; items: (OrderItem & { product: Product; exceptionQty?: number })[]; lockedByName?: string })[]> {
     const query = type
       ? db.select().from(workUnits).where(eq(workUnits.type, type as any))
       : db.select().from(workUnits);
@@ -470,6 +470,16 @@ export class DatabaseStorage implements IStorage {
     // Fetch Orders
     const ordersData = await db.select().from(orders).where(inArray(orders.id, orderIds));
     const ordersMap = new Map(ordersData.map(o => [o.id, o]));
+
+    // Fetch locked-by user names
+    const lockedByIds = [...new Set(wus.map(wu => wu.lockedBy).filter(Boolean))] as string[];
+    const usersMap = new Map<string, string>();
+    if (lockedByIds.length > 0) {
+      const usersData = await db.select({ id: users.id, name: users.name }).from(users).where(inArray(users.id, lockedByIds));
+      for (const u of usersData) {
+        usersMap.set(u.id, u.name);
+      }
+    }
 
     // Fetch Items
     const itemsData = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
@@ -488,7 +498,7 @@ export class DatabaseStorage implements IStorage {
       : [];
 
     // Group exceptions by itemId
-    const exceptionsMap = new Map<string, number>(); // itemId -> totalQty
+    const exceptionsMap = new Map<string, number>();
     for (const exc of exceptionsData) {
       const current = exceptionsMap.get(exc.orderItemId) || 0;
       exceptionsMap.set(exc.orderItemId, current + Number(exc.quantity));
@@ -509,7 +519,7 @@ export class DatabaseStorage implements IStorage {
     }
 
     // Assemble Result
-    const result: (WorkUnit & { order: Order; items: (OrderItem & { product: Product; exceptionQty?: number })[] })[] = [];
+    const result: (WorkUnit & { order: Order; items: (OrderItem & { product: Product; exceptionQty?: number })[]; lockedByName?: string })[] = [];
 
     for (const wu of wus) {
       const order = ordersMap.get(wu.orderId);
@@ -518,7 +528,8 @@ export class DatabaseStorage implements IStorage {
         const filteredItems = wu.section
           ? allItems.filter(i => i.section === wu.section && i.pickupPoint === wu.pickupPoint)
           : allItems.filter(i => i.pickupPoint === wu.pickupPoint);
-        result.push({ ...wu, order, items: filteredItems });
+        const lockedByName = wu.lockedBy ? usersMap.get(wu.lockedBy) : undefined;
+        result.push({ ...wu, order, items: filteredItems, lockedByName });
       }
     }
 
@@ -911,19 +922,22 @@ export class DatabaseStorage implements IStorage {
     const rules = await db.select().from(manualQtyRules).where(eq(manualQtyRules.active, true));
     
     for (const rule of rules) {
-      switch (rule.ruleType) {
-        case "product_code":
-          if (product.erpCode === rule.value) return true;
-          break;
-        case "barcode":
-          if (product.barcode === rule.value || product.boxBarcode === rule.value) return true;
-          break;
-        case "description_keyword":
-          if (product.name && product.name.toUpperCase().includes(rule.value.toUpperCase())) return true;
-          break;
-        case "manufacturer":
-          if (product.manufacturer && product.manufacturer.toUpperCase().includes(rule.value.toUpperCase())) return true;
-          break;
+      const values = rule.value.split(";").map(v => v.trim()).filter(v => v.length > 0);
+      for (const val of values) {
+        switch (rule.ruleType) {
+          case "product_code":
+            if (product.erpCode === val) return true;
+            break;
+          case "barcode":
+            if (product.barcode === val || product.boxBarcode === val) return true;
+            break;
+          case "description_keyword":
+            if (product.name && product.name.toUpperCase().includes(val.toUpperCase())) return true;
+            break;
+          case "manufacturer":
+            if (product.manufacturer && product.manufacturer.toUpperCase().includes(val.toUpperCase())) return true;
+            break;
+        }
       }
     }
     return false;

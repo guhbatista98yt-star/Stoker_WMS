@@ -296,10 +296,13 @@ export default function ManualQtyRulesPage() {
             <div className="space-y-2">
               <Label>Valor</Label>
               <Input
-                placeholder="Ex: 12345 ou PLASTUBOS"
+                placeholder="Ex: P001; P005; P004 ou PLASTUBOS; AMANCO"
                 value={formValue}
                 onChange={(e) => setFormValue(e.target.value)}
               />
+              <p className="text-xs text-muted-foreground">
+                Para múltiplos valores, separe com ponto e vírgula (;). Ex: P001; P005; P004
+              </p>
             </div>
             <div className="space-y-2">
               <Label>Descrição (opcional)</Label>
@@ -345,10 +348,13 @@ export default function ManualQtyRulesPage() {
             <div className="space-y-2">
               <Label>Valor</Label>
               <Input
-                placeholder="Ex: 12345 ou PLASTUBOS"
+                placeholder="Ex: P001; P005; P004 ou PLASTUBOS; AMANCO"
                 value={editValue}
                 onChange={(e) => setEditValue(e.target.value)}
               />
+              <p className="text-xs text-muted-foreground">
+                Para múltiplos valores, separe com ponto e vírgula (;). Ex: P001; P005; P004
+              </p>
             </div>
             <div className="space-y-2">
               <Label>Descrição (opcional)</Label>
