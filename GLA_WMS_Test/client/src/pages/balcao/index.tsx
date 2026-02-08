@@ -1,32 +1,81 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth, useSessionQueryKey } from "@/lib/auth";
-import { GradientHeader } from "@/components/ui/gradient-header";
-import { SectionCard } from "@/components/ui/section-card";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { DatePickerWithRange } from "@/components/ui/date-range-picker";
+import { DateRange } from "react-day-picker";
 import { ScanInput } from "@/components/ui/scan-input";
 import { ResultDialog } from "@/components/ui/result-dialog";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { useSSE } from "@/hooks/use-sse";
+import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
 import {
   Store,
-  LogOut,
   Package,
+  List,
+  LogOut,
   Check,
   AlertTriangle,
-  ChevronRight,
-  Clock,
+  Search,
+  Plus,
+  ArrowRight,
+  Calendar,
   Timer,
 } from "lucide-react";
-import type { WorkUnitWithDetails, OrderItem, Product } from "@shared/schema";
+import { Input } from "@/components/ui/input";
+import type { WorkUnitWithDetails, OrderItem, Product, ExceptionType, UserSettings } from "@shared/schema";
+import { ExceptionDialog } from "@/components/orders/exception-dialog";
+import { getCurrentWeekRange } from "@/lib/date-utils";
+import { format } from "date-fns";
 
-type BalcaoStep = "select" | "picking" | "complete";
+type BalcaoStep = "select" | "scan_cart" | "picking";
+type PickingTab = "product" | "list";
+
+const STORAGE_KEY = "wms:balcao-session";
+
+interface SessionData {
+  tab: PickingTab;
+  productIndex: number;
+  workUnitIds: string[];
+}
 
 interface ItemWithProduct extends OrderItem {
   product: Product;
+  exceptionQty?: number;
+}
+
+interface AggregatedProduct {
+  product: Product;
+  totalQty: number;
+  separatedQty: number;
+  exceptionQty: number;
+  items: ItemWithProduct[];
+  orderCodes: string[];
+  sections: string[];
+}
+
+function saveSession(data: SessionData) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch {}
+}
+
+function loadSession(): SessionData | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+}
+
+function clearSession() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {}
 }
 
 function formatTime(seconds: number): string {
@@ -41,7 +90,10 @@ export default function BalcaoPage() {
   const queryClient = useQueryClient();
 
   const [step, setStep] = useState<BalcaoStep>("select");
-  const [selectedWorkUnit, setSelectedWorkUnit] = useState<WorkUnitWithDetails | null>(null);
+  const [selectedWorkUnits, setSelectedWorkUnits] = useState<string[]>([]);
+  const [pickingTab, setPickingTab] = useState<PickingTab>("product");
+  const [currentProductIndex, setCurrentProductIndex] = useState(0);
+
   const [scanStatus, setScanStatus] = useState<"idle" | "success" | "error" | "warning">("idle");
   const [scanMessage, setScanMessage] = useState("");
   const [showResultDialog, setShowResultDialog] = useState(false);
@@ -50,21 +102,218 @@ export default function BalcaoPage() {
     title: "",
     message: "",
   });
+
   const [elapsedTime, setElapsedTime] = useState(0);
+
+  useEffect(() => {
+    if (scanStatus !== "idle") {
+      const timer = setTimeout(() => {
+        setScanStatus("idle");
+        setScanMessage("");
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [scanStatus]);
+
+  const [showExceptionDialog, setShowExceptionDialog] = useState(false);
+  const [exceptionItem, setExceptionItem] = useState<ItemWithProduct | null>(null);
+
+  const [filterOrderId, setFilterOrderId] = useState("");
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(getCurrentWeekRange());
+  const [tempDateRange, setTempDateRange] = useState<DateRange | undefined>(getCurrentWeekRange());
+
+  const [sessionRestored, setSessionRestored] = useState(false);
+  const [multiplierValue, setMultiplierValue] = useState(1);
+  const [manualQtyAllowed, setManualQtyAllowed] = useState<Record<string, boolean>>({});
+
+  const userSettings = (user?.settings as UserSettings) || {};
+  const hasManualQtyPermission = !!userSettings.allowManualQty;
+  const hasMultiplierPermission = !!userSettings.allowMultiplier;
 
   const workUnitsQueryKey = useSessionQueryKey(["/api/work-units", "balcao"]);
 
   const { data: workUnits, isLoading } = useQuery<WorkUnitWithDetails[]>({
     queryKey: workUnitsQueryKey,
+    refetchInterval: 1000,
   });
 
+  const handleSSEMessage = useCallback((type: string, _data: any) => {
+    queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+    if (type === "exception_created") {
+      toast({
+        title: "Nova Exceção",
+        description: "Uma exceção foi registrada",
+        variant: "destructive",
+      });
+    }
+  }, [queryClient, workUnitsQueryKey, toast]);
+
+  useSSE("/api/sse", [
+    "picking_update", "lock_acquired", "lock_released", "picking_started",
+    "item_picked", "exception_created", "picking_finished",
+  ], handleSSEMessage);
+
+  const myLockedUnits = useMemo(() => {
+    if (!workUnits || !user) return [];
+    return workUnits.filter(wu => wu.lockedBy === user.id && wu.status !== "concluido");
+  }, [workUnits, user]);
+
+  const allMyUnits = useMemo(() => {
+    if (!workUnits || !user) return [];
+    return workUnits.filter(wu => wu.lockedBy === user.id);
+  }, [workUnits, user]);
+
+  const aggregatedProducts = useMemo((): AggregatedProduct[] => {
+    const units = allMyUnits.length > 0 ? allMyUnits : [];
+    const allItems: ItemWithProduct[] = units.flatMap(wu => (wu.items as ItemWithProduct[]) || []);
+
+    const map: Record<string, AggregatedProduct> = {};
+    allItems.forEach(item => {
+      const pid = item.productId;
+      if (!map[pid]) {
+        map[pid] = {
+          product: item.product,
+          totalQty: 0,
+          separatedQty: 0,
+          exceptionQty: 0,
+          items: [],
+          orderCodes: [],
+          sections: [],
+        };
+      }
+      map[pid].totalQty += Number(item.quantity);
+      map[pid].separatedQty += Number(item.separatedQty);
+      map[pid].exceptionQty += Number(item.exceptionQty || 0);
+      map[pid].items.push(item);
+
+      const wu = units.find(w => w.items.some(i => i.id === item.id));
+      if (wu && !map[pid].orderCodes.includes(wu.order.erpOrderId)) {
+        map[pid].orderCodes.push(wu.order.erpOrderId);
+      }
+      if (item.section && !map[pid].sections.includes(item.section)) {
+        map[pid].sections.push(item.section);
+      }
+    });
+
+    return Object.values(map);
+  }, [allMyUnits]);
+
+  const currentProduct = aggregatedProducts[currentProductIndex] || aggregatedProducts[0] || null;
+
+  useEffect(() => {
+    if (aggregatedProducts.length > 0 && currentProductIndex >= aggregatedProducts.length) {
+      setCurrentProductIndex(0);
+    }
+  }, [aggregatedProducts.length, currentProductIndex]);
+
+  useEffect(() => {
+    if (!hasManualQtyPermission && !hasMultiplierPermission) return;
+    if (aggregatedProducts.length === 0) return;
+
+    const productIds = aggregatedProducts.map(ap => ap.product.id).filter(id => !(id in manualQtyAllowed));
+    if (productIds.length === 0) return;
+
+    apiRequest("POST", "/api/manual-qty-rules/check", { productIds })
+      .then(res => res.json())
+      .then((results: Record<string, boolean>) => {
+        setManualQtyAllowed(prev => ({ ...prev, ...results }));
+      })
+      .catch(() => {
+        const fallback: Record<string, boolean> = {};
+        productIds.forEach(id => { fallback[id] = false; });
+        setManualQtyAllowed(prev => ({ ...prev, ...fallback }));
+      });
+  }, [aggregatedProducts, hasManualQtyPermission, hasMultiplierPermission]);
+
+  useEffect(() => {
+    if (workUnits && user && !sessionRestored) {
+      setSessionRestored(true);
+      const saved = loadSession();
+      if (saved && saved.workUnitIds.length > 0) {
+        const stillLockedIds = saved.workUnitIds.filter(id =>
+          workUnits.some(wu => wu.id === id && wu.lockedBy === user.id)
+        );
+        if (stillLockedIds.length > 0) {
+          setStep("picking");
+          setPickingTab(saved.tab);
+          setCurrentProductIndex(0);
+          setSelectedWorkUnits(stillLockedIds);
+          toast({ title: "Sessão Restaurada", description: "Retomando atendimento anterior" });
+          return;
+        } else {
+          clearSession();
+        }
+      }
+
+      const myUnit = workUnits.find(wu => wu.lockedBy === user.id && wu.status !== "concluido");
+      if (myUnit) {
+        const myIds = workUnits.filter(wu => wu.lockedBy === user.id).map(wu => wu.id);
+        setStep("picking");
+        setSelectedWorkUnits(myIds);
+        toast({ title: "Sessão Restaurada", description: `Retomando pedido ${myUnit.order.erpOrderId}` });
+      }
+    }
+  }, [workUnits, user, sessionRestored, toast]);
+
+  useEffect(() => {
+    if (step === "picking" && allMyUnits.length > 0) {
+      saveSession({
+        tab: pickingTab,
+        productIndex: currentProductIndex,
+        workUnitIds: allMyUnits.map(wu => wu.id),
+      });
+    }
+  }, [step, pickingTab, currentProductIndex, allMyUnits]);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    if (step === "picking" && allMyUnits.length > 0) {
+      interval = setInterval(() => {
+        setElapsedTime((prev) => prev + 1);
+      }, 1000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [step, allMyUnits.length]);
+
   const lockMutation = useMutation({
-    mutationFn: async (workUnitId: string) => {
-      const res = await apiRequest("POST", "/api/work-units/lock", { workUnitIds: [workUnitId] });
+    mutationFn: async (workUnitIds: string[]) => {
+      const res = await apiRequest("POST", "/api/work-units/lock", { workUnitIds });
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+    },
+  });
+
+  const scanCartMutation = useMutation({
+    mutationFn: async ({ workUnitId, qrCode }: { workUnitId: string; qrCode: string }) => {
+      const res = await apiRequest("POST", `/api/work-units/${workUnitId}/scan-cart`, { qrCode });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+    },
+  });
+
+  const unlockMutation = useMutation({
+    mutationFn: async (data: string[] | { ids: string[], reset: boolean }) => {
+      const body = Array.isArray(data)
+        ? { workUnitIds: data }
+        : { workUnitIds: data.ids, reset: data.reset };
+      const res = await apiRequest("POST", "/api/work-units/unlock", body);
+      if (!res.ok) throw new Error("Erro ao desbloquear unidades");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+      clearSession();
+      setSelectedWorkUnits([]);
+      setStep("select");
+      setCurrentProductIndex(0);
+      setPickingTab("product");
+      setElapsedTime(0);
     },
   });
 
@@ -73,81 +322,205 @@ export default function BalcaoPage() {
       const res = await apiRequest("POST", `/api/work-units/${workUnitId}/balcao-item`, { barcode });
       return res.json();
     },
-  });
-
-  const completeMutation = useMutation({
-    mutationFn: async (workUnitId: string) => {
-      const res = await apiRequest("POST", `/api/work-units/${workUnitId}/complete-balcao`, {
-        elapsedTime,
-      });
-      return res.json();
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+      if (data.workUnit) {
+        queryClient.setQueryData(workUnitsQueryKey, (oldData: any[]) => {
+          if (!oldData) return oldData;
+          return oldData.map(wu => wu.id === data.workUnit.id ? data.workUnit : wu);
+        });
+      }
     },
   });
 
-  // Timer effect
-  useEffect(() => {
-    let interval: NodeJS.Timeout | null = null;
-    if (step === "picking" && selectedWorkUnit) {
-      interval = setInterval(() => {
-        setElapsedTime((prev) => prev + 1);
-      }, 1000);
-    }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [step, selectedWorkUnit]);
+  const createExceptionMutation = useMutation({
+    mutationFn: async (data: {
+      workUnitId: string;
+      orderItemId: string;
+      type: ExceptionType;
+      quantity: number;
+      observation: string;
+    }) => {
+      const res = await apiRequest("POST", "/api/exceptions", data);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+      toast({ title: "Exceção Registrada", description: "A exceção foi reportada com sucesso" });
+      setShowExceptionDialog(false);
+      setExceptionItem(null);
+    },
+    onError: (error: Error) => {
+      let message = "Falha ao registrar exceção";
+      try {
+        const errorData = JSON.parse(error.message);
+        if (errorData.error) message = errorData.error;
+      } catch {}
+      toast({ title: "Erro", description: message, variant: "destructive" });
+    },
+  });
 
-  const availableWorkUnits = workUnits?.filter(
-    (wu) => wu.status === "pendente" && !wu.lockedBy
-  ) || [];
+  const completeWorkUnitMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await apiRequest("POST", `/api/work-units/${id}/complete-balcao`, { elapsedTime });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+    },
+    onError: () => {
+      toast({ title: "Erro", description: "Itens pendentes.", variant: "destructive" });
+    },
+  });
 
-  const handleSelectWorkUnit = async (workUnit: WorkUnitWithDetails) => {
-    try {
-      await lockMutation.mutateAsync(workUnit.id);
-      setSelectedWorkUnit(workUnit);
-      setElapsedTime(0);
-      setStep("picking");
-    } catch {
-      toast({
-        title: "Erro",
-        description: "Falha ao iniciar atendimento",
-        variant: "destructive",
-      });
+  const clearExceptionsMutation = useMutation({
+    mutationFn: async (orderItemId: string) => {
+      const res = await apiRequest("DELETE", `/api/exceptions/item/${orderItemId}`);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+      toast({ title: "Exceções Limpas", description: "As exceções foram removidas com sucesso" });
+    },
+    onError: () => {
+      toast({ title: "Erro", description: "Falha ao limpar exceções", variant: "destructive" });
+    },
+  });
+
+  const availableWorkUnits = useMemo(() => {
+    return workUnits?.filter((wu) => {
+      if (wu.order.status === "finalizado") return false;
+      if (wu.status === "concluido") return false;
+      if (wu.lockedBy && wu.lockedBy !== user?.id) return false;
+      if (!wu.order.isLaunched) return false;
+
+      if (filterOrderId && !wu.order.erpOrderId.toLowerCase().includes(filterOrderId.toLowerCase())) return false;
+
+      if (dateRange?.from) {
+        const orderDate = new Date(wu.order.createdAt);
+        const fromDate = new Date(dateRange.from);
+        fromDate.setHours(0, 0, 0, 0);
+        if (dateRange.to) {
+          const toDate = new Date(dateRange.to);
+          toDate.setHours(23, 59, 59, 999);
+          if (orderDate < fromDate || orderDate > toDate) return false;
+        } else {
+          if (orderDate < fromDate) return false;
+        }
+      }
+
+      return true;
+    }) || [];
+  }, [workUnits, user, filterOrderId, dateRange]);
+
+  const groupedWorkUnits = useMemo(() => {
+    const groups: Record<string, typeof availableWorkUnits> = {};
+    availableWorkUnits.forEach((wu) => {
+      if (!groups[wu.orderId]) groups[wu.orderId] = [];
+      groups[wu.orderId].push(wu);
+    });
+    return Object.values(groups);
+  }, [availableWorkUnits]);
+
+  const handleSelectGroup = (wus: typeof availableWorkUnits, checked: boolean) => {
+    const ids = wus.map((wu) => wu.id);
+    if (checked) {
+      setSelectedWorkUnits((prev) => Array.from(new Set([...prev, ...ids])));
+    } else {
+      setSelectedWorkUnits((prev) => prev.filter((id) => !ids.includes(id)));
     }
   };
 
-  const handleScanItem = async (barcode: string) => {
-    if (!selectedWorkUnit) return;
+  const handleStartBalcao = async () => {
+    if (selectedWorkUnits.length === 0) {
+      toast({ title: "Atenção", description: "Selecione pelo menos um pedido", variant: "destructive" });
+      return;
+    }
+    try {
+      await lockMutation.mutateAsync(selectedWorkUnits);
+      setStep("scan_cart");
+      setScanStatus("idle");
+      setScanMessage("");
+    } catch {
+      toast({ title: "Erro", description: "Falha ao bloquear unidades de trabalho", variant: "destructive" });
+    }
+  };
+
+  const handleScanCart = async (qrCode: string) => {
+    const units = allMyUnits.length > 0 ? allMyUnits : selectedWorkUnits.map(id => workUnits?.find(wu => wu.id === id)).filter(Boolean) as WorkUnitWithDetails[];
+    if (units.length === 0) return;
 
     try {
-      const result = await scanItemMutation.mutateAsync({
-        workUnitId: selectedWorkUnit.id,
-        barcode,
-      });
+      for (const wu of units) {
+        await scanCartMutation.mutateAsync({ workUnitId: wu.id, qrCode });
+      }
+      setScanStatus("success");
+      setScanMessage("Cesto/carrinho registrado!");
+      setTimeout(() => {
+        setStep("picking");
+        setPickingTab("product");
+        setCurrentProductIndex(0);
+        setElapsedTime(0);
+        setScanStatus("idle");
+        setScanMessage("");
+      }, 800);
+    } catch {
+      setScanStatus("error");
+      setScanMessage("Erro ao registrar cesto/carrinho");
+    }
+  };
+
+  const handleScanItem = useCallback(async (barcode: string) => {
+    const units = allMyUnits;
+    if (units.length === 0) return;
+
+    const unitsWithProduct = units.filter(wu =>
+      (wu.items as ItemWithProduct[]).some(item =>
+        item.product?.barcode === barcode || item.product?.boxBarcode === barcode
+      )
+    );
+
+    let targetUnit = unitsWithProduct.find(wu => {
+      const item = (wu.items as ItemWithProduct[]).find(i =>
+        i.product?.barcode === barcode || i.product?.boxBarcode === barcode
+      );
+      if (!item) return false;
+      const exceptionQty = Number(item.exceptionQty || 0);
+      return Number(item.separatedQty) + exceptionQty < Number(item.quantity);
+    });
+
+    const finalUnit = targetUnit || unitsWithProduct[0] || units[0];
+    if (!finalUnit) return;
+
+    try {
+      const result = await scanItemMutation.mutateAsync({ workUnitId: finalUnit.id, barcode });
 
       if (result.status === "success") {
         setScanStatus("success");
         setScanMessage(`${result.product.name} - ${result.quantity} ${result.product.unit}`);
-        setSelectedWorkUnit(result.workUnit);
 
-        // Check if all items are complete
-        const allComplete = result.workUnit.items.every(
-          (item: ItemWithProduct) => Number(item.separatedQty) >= Number(item.quantity)
-        );
-
-        if (allComplete) {
-          await completeMutation.mutateAsync(selectedWorkUnit.id);
-          setResultDialogConfig({
-            type: "success",
-            title: "Atendimento Concluído",
-            message: `Tempo total: ${formatTime(elapsedTime)}`,
-          });
-          setShowResultDialog(true);
-          setStep("complete");
+        const productId = result.product.id;
+        const idx = aggregatedProducts.findIndex(ap => ap.product.id === productId);
+        if (idx >= 0) {
+          setCurrentProductIndex(idx);
         }
+        setPickingTab("product");
+
+        const updatedUnits = units.map(wu => wu.id === result.workUnit.id ? result.workUnit : wu);
+        const allCompleted = updatedUnits.every(wu => wu.status === "concluido");
+        if (allCompleted) {
+          handleCompleteAll();
+        }
+      } else if (result.status === "over_quantity_with_exception") {
+        setScanStatus("error");
+        setScanMessage(result.message || "Quantidade excedida considerando exceções");
+        setResultDialogConfig({ type: "warning", title: "Exceções Registradas", message: result.message || "Este item tem exceções registradas." });
+        setShowResultDialog(true);
       } else if (result.status === "over_quantity") {
         setScanStatus("error");
-        setScanMessage("Quantidade excedida! Verifique o item.");
+        setScanMessage("Quantidade excedida!");
+        setResultDialogConfig({ type: "error", title: "Quantidade Excedida", message: "O item foi bipado mais vezes que o necessário." });
+        setShowResultDialog(true);
       } else if (result.status === "not_found") {
         setScanStatus("warning");
         setScanMessage("Produto não encontrado neste pedido");
@@ -156,227 +529,562 @@ export default function BalcaoPage() {
       setScanStatus("error");
       setScanMessage("Erro ao processar leitura");
     }
+  }, [allMyUnits, scanItemMutation, aggregatedProducts]);
+
+  const globalScanHandler = useCallback((barcode: string) => {
+    if (step === "picking") {
+      handleScanItem(barcode);
+    } else if (step === "scan_cart") {
+      handleScanCart(barcode);
+    }
+  }, [step, handleScanItem]);
+
+  useBarcodeScanner(globalScanHandler, step === "picking" || step === "scan_cart");
+
+  const handleIncrementProduct = async (ap: AggregatedProduct, qty: number = 1) => {
+    const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
+    if (remaining <= 0) return;
+
+    const effectiveQty = Math.min(qty, remaining);
+    const barcode = ap.product.barcode;
+    if (!barcode) return;
+
+    try {
+      let successCount = 0;
+      for (let i = 0; i < effectiveQty; i++) {
+        const incompleteItem = ap.items.find(it =>
+          Number(it.separatedQty) + Number(it.exceptionQty || 0) + successCount < Number(it.quantity)
+        );
+        if (!incompleteItem) break;
+        const wu = allMyUnits.find(w => w.items.some(it => it.id === incompleteItem.id));
+        if (!wu) break;
+
+        try {
+          const result = await scanItemMutation.mutateAsync({ workUnitId: wu.id, barcode });
+          if (result.status === "success") {
+            successCount++;
+          } else {
+            break;
+          }
+        } catch {
+          break;
+        }
+      }
+      if (successCount > 0) {
+        setScanStatus("success");
+        setScanMessage(`+${successCount} ${ap.product.name}`);
+        setMultiplierValue(1);
+      } else {
+        setScanStatus("error");
+        setScanMessage("Quantidade excedida!");
+      }
+    } catch {
+      setScanStatus("error");
+      setScanMessage("Erro ao incrementar");
+    }
+  };
+
+  const handleCompleteAll = async () => {
+    const incompleteUnits = myLockedUnits.filter(wu => wu.status !== "concluido");
+    try {
+      for (const wu of incompleteUnits) {
+        await completeWorkUnitMutation.mutateAsync(wu.id);
+      }
+      clearSession();
+      setStep("select");
+      setSelectedWorkUnits([]);
+      setCurrentProductIndex(0);
+      setPickingTab("product");
+      setResultDialogConfig({
+        type: "success",
+        title: "Atendimento Concluído!",
+        message: `Tempo total: ${formatTime(elapsedTime)}`,
+      });
+      setShowResultDialog(true);
+      setElapsedTime(0);
+      toast({ title: "Atendimento Concluído!", description: "Todos os itens foram separados com sucesso." });
+    } catch {
+      toast({ title: "Erro", description: "Falha ao concluir. Verifique itens pendentes.", variant: "destructive" });
+    }
+  };
+
+  const handleCancelPicking = () => {
+    const ids = allMyUnits.map(wu => wu.id);
+    if (ids.length > 0) {
+      unlockMutation.mutate({ ids, reset: true });
+    } else {
+      clearSession();
+      setStep("select");
+      setSelectedWorkUnits([]);
+      setElapsedTime(0);
+    }
+  };
+
+  const handleNextProduct = () => {
+    const nextIdx = aggregatedProducts.findIndex((ap, idx) => {
+      if (idx <= currentProductIndex) return false;
+      const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
+      return remaining > 0;
+    });
+
+    if (nextIdx >= 0) {
+      setCurrentProductIndex(nextIdx);
+    } else {
+      const wrapIdx = aggregatedProducts.findIndex((ap) => {
+        const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
+        return remaining > 0;
+      });
+      if (wrapIdx >= 0) {
+        setCurrentProductIndex(wrapIdx);
+      }
+    }
   };
 
   const getProgress = () => {
-    if (!selectedWorkUnit?.items) return 0;
-    const total = selectedWorkUnit.items.reduce(
-      (sum, item) => sum + Number(item.quantity),
-      0
-    );
-    const separated = selectedWorkUnit.items.reduce(
-      (sum, item) => sum + Number(item.separatedQty),
-      0
-    );
-    return total > 0 ? (separated / total) * 100 : 0;
+    if (aggregatedProducts.length === 0) return 0;
+    const total = aggregatedProducts.reduce((s, ap) => s + ap.totalQty, 0);
+    const done = aggregatedProducts.reduce((s, ap) => s + ap.separatedQty + ap.exceptionQty, 0);
+    return total > 0 ? (done / total) * 100 : 0;
   };
 
-  const handleReset = () => {
-    setStep("select");
-    setSelectedWorkUnit(null);
-    setScanStatus("idle");
-    setScanMessage("");
-    setElapsedTime(0);
-    queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+  const allItemsComplete = aggregatedProducts.length > 0 && aggregatedProducts.every(ap =>
+    ap.separatedQty + ap.exceptionQty >= ap.totalQty
+  );
+
+  const handleApplyDateFilter = () => {
+    setDateRange(tempDateRange);
   };
 
   return (
-    <div className="min-h-screen bg-background">
-      <GradientHeader title="Balcão" subtitle={user?.name}>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={logout}
-          className="bg-white/10 border-white/20 text-white hover:bg-white/20"
-          data-testid="button-logout"
-        >
-          <LogOut className="h-4 w-4 mr-2" />
-          Sair
-        </Button>
-      </GradientHeader>
-
-      <main className="max-w-2xl mx-auto px-4 py-6 space-y-4">
-        {/* Step Progress */}
-        <div className="flex items-center justify-between text-sm mb-6">
-          <div className={`flex items-center gap-2 ${step === "select" ? "text-primary font-medium" : "text-muted-foreground"}`}>
-            <span className="w-6 h-6 rounded-full bg-primary text-white flex items-center justify-center text-xs">1</span>
-            Selecionar
-          </div>
-          <ChevronRight className="h-4 w-4 text-muted-foreground" />
-          <div className={`flex items-center gap-2 ${step === "picking" ? "text-primary font-medium" : "text-muted-foreground"}`}>
-            <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${step !== "select" ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}>2</span>
-            Atender
-          </div>
-          <ChevronRight className="h-4 w-4 text-muted-foreground" />
-          <div className={`flex items-center gap-2 ${step === "complete" ? "text-primary font-medium" : "text-muted-foreground"}`}>
-            <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${step === "complete" ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}>
-              {step === "complete" ? <Check className="h-3 w-3" /> : "3"}
-            </span>
-            Concluir
-          </div>
+    <div className="min-h-screen bg-background flex flex-col" data-module="balcao">
+      <header className="flex items-center justify-between px-3 py-2 border-b border-border bg-card">
+        <div className="flex items-center gap-2 min-w-0">
+          <Store className="h-4 w-4 text-amber-500 shrink-0" />
+          <span className="text-sm font-medium truncate">{user?.name}</span>
         </div>
+        <div className="flex items-center gap-2">
+          {step === "picking" && (
+            <div className="flex items-center gap-1 bg-amber-500/10 px-2 py-1 rounded-full">
+              <Timer className="h-3.5 w-3.5 text-amber-500" />
+              <span className="font-mono text-xs font-medium text-amber-600">{formatTime(elapsedTime)}</span>
+            </div>
+          )}
+          <Button variant="ghost" size="sm" onClick={logout} className="h-8 px-2 text-xs" data-testid="button-logout">
+            <LogOut className="h-3.5 w-3.5 mr-1" />
+            Sair
+          </Button>
+        </div>
+      </header>
 
-        {/* Step: Select Work Unit */}
-        {step === "select" && (
-          <SectionCard title="Pedidos de Balcão" icon={<Store className="h-4 w-4 text-primary" />}>
-            {isLoading ? (
-              <div className="space-y-3">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <Skeleton key={i} className="h-20 w-full rounded-lg" />
-                ))}
-              </div>
-            ) : availableWorkUnits.length > 0 ? (
-              <div className="space-y-3">
-                {availableWorkUnits.map((wu) => (
-                  <button
-                    key={wu.id}
-                    onClick={() => handleSelectWorkUnit(wu)}
-                    disabled={lockMutation.isPending}
-                    className="w-full flex items-center gap-4 p-4 rounded-xl border border-border hover:border-primary/30 hover:bg-muted/50 transition-colors text-left"
-                    data-testid={`work-unit-${wu.id}`}
-                  >
-                    <div className="w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center">
-                      <Package className="h-6 w-6 text-primary" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-mono font-semibold">{wu.order.erpOrderId}</span>
-                        <StatusBadge status={wu.status} />
-                      </div>
-                      <p className="text-sm text-muted-foreground truncate">
-                        {wu.order.customerName}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {wu.items?.length || 0} itens • R$ {Number(wu.order.totalValue).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
-                      </p>
-                    </div>
-                    <ChevronRight className="h-5 w-5 text-muted-foreground" />
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div className="text-center py-12 text-muted-foreground">
-                <Store className="h-16 w-16 mx-auto mb-4 opacity-40" />
-                <p className="text-lg font-medium">Nenhum pedido de balcão</p>
-                <p className="text-sm">Aguarde novos clientes</p>
-              </div>
-            )}
-          </SectionCard>
-        )}
-
-        {/* Step: Picking */}
-        {step === "picking" && selectedWorkUnit && (
-          <>
-            <SectionCard
-              title={`Pedido ${selectedWorkUnit.order.erpOrderId}`}
-              icon={<Store className="h-4 w-4 text-primary" />}
-              actions={
-                <div className="flex items-center gap-2 bg-primary/10 px-3 py-1.5 rounded-full">
-                  <Timer className="h-4 w-4 text-primary" />
-                  <span className="font-mono font-medium text-primary">{formatTime(elapsedTime)}</span>
-                </div>
-              }
-            >
-              <div className="mb-4">
-                <p className="text-sm text-muted-foreground mb-2">{selectedWorkUnit.order.customerName}</p>
-                <div className="flex justify-between text-sm mb-2">
-                  <span>Progresso</span>
-                  <span className="font-medium">{Math.round(getProgress())}%</span>
-                </div>
-                <Progress value={getProgress()} className="h-2" />
-              </div>
-
-              <ScanInput
-                placeholder="Leia o código de barras do produto..."
-                onScan={handleScanItem}
-                status={scanStatus}
-                statusMessage={scanMessage}
-                autoFocus
+      {step === "select" && (
+        <div className="flex-1 overflow-auto px-3 py-3 space-y-3">
+          <div className="space-y-2 p-2.5 bg-muted/30 rounded-lg border border-border">
+            <div className="flex items-center gap-2">
+              <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <Input
+                placeholder="N° Pedido..."
+                value={filterOrderId}
+                onChange={(e) => setFilterOrderId(e.target.value)}
+                className="h-8 text-xs"
               />
-            </SectionCard>
-
-            <SectionCard title="Itens do Pedido">
-              <div className="space-y-2">
-                {(selectedWorkUnit.items as ItemWithProduct[])?.map((item) => {
-                  const remaining = Number(item.quantity) - Number(item.separatedQty);
-                  const isComplete = remaining <= 0;
-
-                  return (
-                    <div
-                      key={item.id}
-                      className={`flex items-center gap-3 p-3 rounded-lg border ${
-                        isComplete
-                          ? "bg-green-50 border-green-200 dark:bg-green-950/30 dark:border-green-900"
-                          : "border-border"
-                      }`}
-                      data-testid={`item-${item.id}`}
-                    >
-                      <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                        isComplete ? "bg-green-500 text-white" : "bg-muted"
-                      }`}>
-                        {isComplete ? (
-                          <Check className="h-4 w-4" />
-                        ) : (
-                          <span className="text-sm font-medium">{remaining}</span>
-                        )}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="font-medium truncate">{item.product.name}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {item.product.barcode} • Ponto {item.pickupPoint}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-sm font-medium">
-                          {Number(item.separatedQty)}/{Number(item.quantity)} {item.product.unit}
-                        </p>
-                      </div>
-                    </div>
-                  );
-                })}
+            </div>
+            <div className="flex items-center gap-2">
+              <Calendar className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <div className="flex-1">
+                <DatePickerWithRange
+                  date={tempDateRange}
+                  onDateChange={setTempDateRange}
+                  className="text-xs h-8"
+                />
               </div>
-
-              <div className="flex gap-2 mt-4">
-                <Button
-                  variant="outline"
-                  className="flex-1"
-                  onClick={() => {
-                    setResultDialogConfig({
-                      type: "warning",
-                      title: "Registrar Exceção",
-                      message: "Deseja reportar um item não encontrado, avariado ou vencido?",
-                    });
-                    setShowResultDialog(true);
-                  }}
-                  data-testid="button-exception"
-                >
-                  <AlertTriangle className="h-4 w-4 mr-2" />
-                  Exceção
-                </Button>
-              </div>
-            </SectionCard>
-          </>
-        )}
-
-        {/* Step: Complete */}
-        {step === "complete" && (
-          <SectionCard>
-            <div className="text-center py-8">
-              <div className="w-20 h-20 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center mx-auto mb-4">
-                <Check className="h-10 w-10 text-green-600 dark:text-green-400" />
-              </div>
-              <h2 className="text-2xl font-bold mb-2">Atendimento Concluído!</h2>
-              <div className="flex items-center justify-center gap-2 text-muted-foreground mb-6">
-                <Clock className="h-4 w-4" />
-                <span>Tempo total: {formatTime(elapsedTime)}</span>
-              </div>
-              <Button onClick={handleReset} className="w-full h-12" data-testid="button-new-balcao">
-                Próximo Cliente
+              <Button size="sm" className="h-8 px-3 text-xs" onClick={handleApplyDateFilter}>
+                Buscar
               </Button>
             </div>
-          </SectionCard>
-        )}
-      </main>
+          </div>
+
+          {isLoading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-14 w-full rounded-lg" />
+              ))}
+            </div>
+          ) : groupedWorkUnits.length > 0 ? (
+            <div className="space-y-1.5">
+              {groupedWorkUnits.map((group) => {
+                const firstWU = group[0];
+                const groupIds = group.map(g => g.id);
+                const isSelected = groupIds.every(id => selectedWorkUnits.includes(id));
+
+                const totalItems = group.reduce((acc, wu) => {
+                  const items = wu.items || [];
+                  return acc + items.reduce((s, item) => s + Number(item.quantity), 0);
+                }, 0);
+
+                const totalValue = Number(firstWU.order.totalValue || 0);
+
+                let createdAt = "";
+                try {
+                  createdAt = format(new Date(firstWU.order.createdAt), "dd/MM HH:mm");
+                } catch {}
+
+                return (
+                  <div
+                    key={firstWU.orderId}
+                    className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${isSelected ? "border-amber-500 bg-amber-500/5" : "border-border"}`}
+                    onClick={() => handleSelectGroup(group, !isSelected)}
+                    data-testid={`order-group-${firstWU.orderId}`}
+                  >
+                    <Checkbox
+                      checked={isSelected}
+                      onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
+                      className="shrink-0"
+                      data-testid={`checkbox-order-${firstWU.orderId}`}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono text-sm font-semibold">{firstWU.order.erpOrderId}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground truncate">{firstWU.order.customerName}</p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-xs font-medium">{totalItems} itens</p>
+                      <p className="text-[10px] text-muted-foreground">
+                        R$ {totalValue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground">{createdAt}</p>
+                    </div>
+                  </div>
+                );
+              })}
+
+              <Button
+                className="w-full h-11 text-sm mt-3 bg-amber-500 hover:bg-amber-600 text-white"
+                onClick={handleStartBalcao}
+                disabled={selectedWorkUnits.length === 0 || lockMutation.isPending}
+                data-testid="button-start-balcao"
+              >
+                <Store className="h-4 w-4 mr-1.5" />
+                Atender
+                {selectedWorkUnits.length > 0 && ` (${new Set(
+                  workUnits?.filter(wu => selectedWorkUnits.includes(wu.id)).map(wu => wu.orderId)
+                ).size})`}
+              </Button>
+            </div>
+          ) : (
+            <div className="text-center py-10 text-muted-foreground">
+              <Store className="h-12 w-12 mx-auto mb-3 opacity-40" />
+              <p className="text-sm font-medium">Nenhum pedido disponível</p>
+              <p className="text-xs">Aguarde novos clientes</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {step === "scan_cart" && (
+        <div className="flex-1 flex items-center justify-center px-4">
+          <div className="w-full max-w-md space-y-6 text-center">
+            <div className="space-y-2">
+              <div className="w-20 h-20 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto">
+                <Store className="h-10 w-10 text-amber-500" />
+              </div>
+              <h2 className="text-lg font-semibold">Leia o Cesto/Carrinho</h2>
+              <p className="text-sm text-muted-foreground">
+                Escaneie o código do cesto ou carrinho onde os produtos separados serão colocados
+              </p>
+            </div>
+            <ScanInput
+              placeholder="Leia o código do cesto/carrinho..."
+              onScan={handleScanCart}
+              status={scanStatus}
+              statusMessage={scanMessage}
+              autoFocus
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const ids = allMyUnits.map(wu => wu.id);
+                if (ids.length > 0) {
+                  unlockMutation.mutate({ ids, reset: true });
+                } else {
+                  setStep("select");
+                  setSelectedWorkUnits([]);
+                }
+              }}
+              className="text-xs"
+            >
+              Cancelar
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {step === "picking" && (
+        <>
+          <div className="px-3 pt-2 pb-1 space-y-1.5 border-b border-border bg-card">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">
+                {allMyUnits.map(wu => wu.order.erpOrderId).filter((v, i, a) => a.indexOf(v) === i).join(", ")}
+              </span>
+              <span className="text-xs font-medium">{Math.round(getProgress())}%</span>
+            </div>
+            <Progress value={getProgress()} className="h-1.5" />
+            <ScanInput
+              placeholder="Leia o código de barras..."
+              onScan={handleScanItem}
+              status={scanStatus}
+              statusMessage={scanMessage}
+              autoFocus
+              className="[&_input]:h-10 [&_input]:text-sm"
+            />
+          </div>
+
+          <div className="flex-1 overflow-auto">
+            {pickingTab === "product" && currentProduct && (
+              <div className="px-3 py-3 space-y-3">
+                <div className="bg-card border border-border rounded-lg p-3 space-y-2.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {currentProduct.orderCodes.map(code => (
+                      <span key={code} className="text-[10px] bg-amber-500/10 text-amber-600 px-1.5 py-0.5 rounded font-mono">{code}</span>
+                    ))}
+                  </div>
+
+                  <p className="text-sm font-medium leading-tight">{currentProduct.product.name}</p>
+
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                    <div>
+                      <span className="text-muted-foreground">Código:</span>
+                      <span className="ml-1 font-mono font-medium">{currentProduct.product.erpCode}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Ref:</span>
+                      <span className="ml-1 font-mono">{currentProduct.product.referenceCode || "—"}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Cód. Barras:</span>
+                      <span className="ml-1 font-mono">{currentProduct.product.barcode || "—"}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Caixa:</span>
+                      <span className="ml-1 font-mono">{currentProduct.product.boxBarcode || "Indisponível"}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1 border-t border-border">
+                    <div>
+                      <span className="text-xs text-muted-foreground">Separado</span>
+                      <p className="text-lg font-bold">
+                        {currentProduct.separatedQty}
+                        <span className="text-muted-foreground font-normal text-sm">/{currentProduct.totalQty}</span>
+                        {currentProduct.exceptionQty > 0 && (
+                          <span className="text-orange-500 text-xs ml-1">(-{currentProduct.exceptionQty} exc)</span>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {(hasManualQtyPermission || hasMultiplierPermission) && manualQtyAllowed[currentProduct.product.id] && (
+                        <>
+                          <div className="flex items-center gap-1">
+                            <span className="text-xs text-muted-foreground">Qtd:</span>
+                            <Input
+                              type="number"
+                              min={1}
+                              max={currentProduct.totalQty - currentProduct.separatedQty - currentProduct.exceptionQty}
+                              value={multiplierValue}
+                              onChange={(e) => setMultiplierValue(Math.max(1, parseInt(e.target.value) || 1))}
+                              className="h-10 w-20 text-center text-sm font-bold"
+                              disabled={!hasMultiplierPermission}
+                            />
+                          </div>
+                          <Button
+                            size="sm"
+                            className="h-10 px-3"
+                            onClick={() => handleIncrementProduct(currentProduct, multiplierValue)}
+                            disabled={
+                              scanItemMutation.isPending ||
+                              (currentProduct.separatedQty + currentProduct.exceptionQty >= currentProduct.totalQty) ||
+                              !currentProduct.product.barcode
+                            }
+                          >
+                            <Plus className="h-5 w-5 mr-1" />
+                            Separar
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 h-9 text-xs"
+                    onClick={() => {
+                      const firstIncompleteItem = currentProduct.items.find(i =>
+                        Number(i.quantity) > Number(i.separatedQty) + Number(i.exceptionQty || 0)
+                      ) || currentProduct.items[0];
+                      setExceptionItem(firstIncompleteItem);
+                      setShowExceptionDialog(true);
+                    }}
+                  >
+                    <AlertTriangle className="h-3.5 w-3.5 mr-1" />
+                    Exceção
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="flex-1 h-9 text-xs"
+                    onClick={handleNextProduct}
+                  >
+                    Próximo
+                    <ArrowRight className="h-3.5 w-3.5 ml-1" />
+                  </Button>
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 h-9 text-xs text-destructive border-destructive/30 hover:bg-destructive/10"
+                    onClick={handleCancelPicking}
+                    disabled={unlockMutation.isPending}
+                    data-testid="button-cancel-picking"
+                  >
+                    Cancelar
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="flex-1 h-9 text-xs bg-green-600 hover:bg-green-700"
+                    onClick={handleCompleteAll}
+                    disabled={!allItemsComplete || completeWorkUnitMutation.isPending}
+                    data-testid="button-complete-picking"
+                  >
+                    <Check className="h-3.5 w-3.5 mr-1" />
+                    Concluir
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {pickingTab === "product" && !currentProduct && aggregatedProducts.length === 0 && (
+              <div className="flex items-center justify-center h-40 text-muted-foreground text-sm">
+                Nenhum produto para separar
+              </div>
+            )}
+
+            {pickingTab === "list" && (
+              <div className="px-3 py-3 space-y-2">
+                {aggregatedProducts.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground text-xs">
+                    Nenhum produto encontrado
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {aggregatedProducts.map((ap, idx) => {
+                      const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
+                      const isComplete = remaining <= 0;
+                      const hasException = ap.exceptionQty > 0;
+
+                      return (
+                        <div
+                          key={ap.product.id}
+                          className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-colors ${
+                            isComplete
+                              ? hasException
+                                ? "bg-amber-50/50 border-amber-200 dark:bg-amber-950/20 dark:border-amber-900/50"
+                                : "bg-green-50/50 border-green-200 dark:bg-green-950/20 dark:border-green-900/50"
+                              : "border-border hover:bg-muted/50"
+                          }`}
+                          onClick={() => {
+                            setCurrentProductIndex(idx);
+                            setPickingTab("product");
+                          }}
+                        >
+                          <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
+                            isComplete
+                              ? hasException ? "bg-amber-500 text-white" : "bg-green-500 text-white"
+                              : "bg-muted"
+                          }`}>
+                            {isComplete ? (
+                              hasException ? <AlertTriangle className="h-3 w-3" /> : <Check className="h-3 w-3" />
+                            ) : (
+                              <span className="text-[10px] font-medium">{remaining}</span>
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-medium truncate">{ap.product.name}</p>
+                            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                              <span className="font-mono">{ap.product.erpCode}</span>
+                              <span>•</span>
+                              <span className="font-mono">{ap.product.barcode || "—"}</span>
+                            </div>
+                            <div className="flex items-center gap-1 mt-0.5">
+                              {ap.orderCodes.map(code => (
+                                <span key={code} className="text-[9px] bg-muted px-1 py-0.5 rounded font-mono">{code}</span>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="text-xs font-medium">
+                              {ap.separatedQty}/{ap.totalQty}
+                            </p>
+                            {ap.exceptionQty > 0 && (
+                              <span className="text-[10px] text-orange-500">-{ap.exceptionQty}</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="flex gap-2 pt-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 h-9 text-xs text-destructive border-destructive/30 hover:bg-destructive/10"
+                    onClick={handleCancelPicking}
+                    disabled={unlockMutation.isPending}
+                  >
+                    Cancelar
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="flex-1 h-9 text-xs bg-green-600 hover:bg-green-700"
+                    onClick={handleCompleteAll}
+                    disabled={!allItemsComplete || completeWorkUnitMutation.isPending}
+                  >
+                    <Check className="h-3.5 w-3.5 mr-1" />
+                    Concluir
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <nav className="flex border-t border-border bg-card shrink-0">
+            <button
+              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${
+                pickingTab === "product" ? "text-amber-500 bg-amber-500/5" : "text-muted-foreground"
+              }`}
+              onClick={() => setPickingTab("product")}
+            >
+              <Package className="h-5 w-5" />
+              <span className="text-[10px] font-medium">Produto</span>
+            </button>
+            <button
+              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${
+                pickingTab === "list" ? "text-amber-500 bg-amber-500/5" : "text-muted-foreground"
+              }`}
+              onClick={() => setPickingTab("list")}
+            >
+              <List className="h-5 w-5" />
+              <span className="text-[10px] font-medium">Lista</span>
+            </button>
+          </nav>
+        </>
+      )}
 
       <ResultDialog
         open={showResultDialog}
@@ -384,8 +1092,33 @@ export default function BalcaoPage() {
         type={resultDialogConfig.type}
         title={resultDialogConfig.title}
         message={resultDialogConfig.message}
-        onAction={step === "complete" ? handleReset : undefined}
       />
+
+      {exceptionItem && (
+        <ExceptionDialog
+          open={showExceptionDialog}
+          onOpenChange={setShowExceptionDialog}
+          productName={exceptionItem.product.name}
+          maxQuantity={Math.max(0, Number(exceptionItem.quantity) - Number(exceptionItem.separatedQty) - (exceptionItem.exceptionQty || 0))}
+          hasExceptions={(exceptionItem.exceptionQty || 0) > 0}
+          onSubmit={(data) => {
+            const wu = allMyUnits.find(w => w.items.some(i => i.id === exceptionItem.id));
+            if (wu) {
+              createExceptionMutation.mutate({
+                workUnitId: wu.id,
+                orderItemId: exceptionItem.id,
+                ...data,
+              });
+            }
+          }}
+          onClearExceptions={() => {
+            clearExceptionsMutation.mutate(exceptionItem.id);
+            setShowExceptionDialog(false);
+          }}
+          isSubmitting={createExceptionMutation.isPending}
+          isClearing={clearExceptionsMutation.isPending}
+        />
+      )}
     </div>
   );
 }

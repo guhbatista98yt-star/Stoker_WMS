@@ -653,7 +653,7 @@ export default function SeparacaoPage() {
   };
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="min-h-screen bg-background flex flex-col" data-module="separacao">
       <header className="flex items-center justify-between px-3 py-2 border-b border-border bg-card">
         <div className="flex items-center gap-2 min-w-0">
           <Package className="h-4 w-4 text-primary shrink-0" />

@@ -954,7 +954,11 @@ export async function registerRoutes(
       }
 
       const currentQty = Number(item.checkedQty);
-      const targetQty = Number(item.quantity);
+      const targetQty = Number(item.separatedQty);
+
+      if (targetQty <= 0) {
+        return res.json({ status: "not_found" });
+      }
 
       if (currentQty >= targetQty) {
         return res.json({ status: "over_quantity", product, quantity: 1 });
@@ -968,7 +972,10 @@ export async function registerRoutes(
 
       const updated = await storage.getWorkUnitById(req.params.id as string);
 
-      const allComplete = updated?.items.every(i => Number(i.checkedQty) >= Number(i.quantity));
+      const allComplete = updated?.items.every(i => {
+        const sep = Number(i.separatedQty) || 0;
+        return sep > 0 && Number(i.checkedQty) >= sep;
+      });
       if (allComplete) {
         await storage.updateWorkUnit(req.params.id as string, { status: "concluido", completedAt: new Date().toISOString() });
         await storage.updateOrder(workUnit.orderId, { status: "conferido" });
