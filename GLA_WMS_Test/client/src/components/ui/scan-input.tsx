@@ -1,0 +1,132 @@
+import { useEffect, useRef, useState } from "react";
+import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
+import { ScanLine, Check, X, AlertTriangle } from "lucide-react";
+
+interface ScanInputProps {
+  placeholder?: string;
+  onScan: (value: string) => void;
+  status?: "idle" | "success" | "error" | "warning";
+  statusMessage?: string;
+  disabled?: boolean;
+  autoFocus?: boolean;
+  className?: string;
+  value?: string;
+  onChange?: (value: string) => void;
+  readOnly?: boolean;
+  inputMode?: React.HTMLAttributes<HTMLInputElement>["inputMode"];
+}
+
+export function ScanInput({
+  placeholder = "Aguardando leitura...",
+  onScan,
+  status = "idle",
+  statusMessage,
+  disabled = false,
+  autoFocus = true,
+  className,
+  value: controlledValue,
+  onChange: controlledOnChange,
+  readOnly,
+  inputMode,
+}: ScanInputProps) {
+  const [internalValue, setInternalValue] = useState("");
+
+  const value = controlledValue !== undefined ? controlledValue : internalValue;
+  const setValue = (newValue: string) => {
+    if (controlledOnChange) {
+      controlledOnChange(newValue);
+    } else {
+      setInternalValue(newValue);
+    }
+  };
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (autoFocus && inputRef.current && !disabled) {
+      inputRef.current.focus();
+    }
+  }, [autoFocus, disabled]);
+
+  useEffect(() => {
+    if (status !== "idle") {
+      const timer = setTimeout(() => {
+        setValue("");
+        if (inputRef.current && !disabled) {
+          inputRef.current.focus();
+        }
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [status, disabled]);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && value.trim()) {
+      onScan(value.trim());
+    }
+  };
+
+  const statusColors = {
+    idle: "border-input focus:ring-primary",
+    success: "border-green-500 bg-green-50 dark:bg-green-950/30 ring-2 ring-green-500",
+    error: "border-red-500 bg-red-50 dark:bg-red-950/30 ring-2 ring-red-500",
+    warning: "border-yellow-500 bg-yellow-50 dark:bg-yellow-950/30 ring-2 ring-yellow-500",
+  };
+
+  const StatusIcon = {
+    idle: ScanLine,
+    success: Check,
+    error: X,
+    warning: AlertTriangle,
+  }[status];
+
+  const iconColors = {
+    idle: "text-muted-foreground",
+    success: "text-green-600 dark:text-green-400",
+    error: "text-red-600 dark:text-red-400",
+    warning: "text-yellow-600 dark:text-yellow-400",
+  };
+
+  return (
+    <div className={cn("relative", className)}>
+      <div className="relative">
+        <StatusIcon
+          className={cn(
+            "absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 transition-colors",
+            iconColors[status]
+          )}
+        />
+        <Input
+          ref={inputRef}
+          type="text"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={placeholder}
+          disabled={disabled}
+          readOnly={readOnly}
+          inputMode={inputMode}
+          className={cn(
+            "pl-11 h-14 text-lg font-mono transition-all",
+            statusColors[status]
+          )}
+          data-testid="input-scan"
+        />
+      </div>
+      {statusMessage && (
+        <p
+          className={cn(
+            "mt-2 text-sm font-medium animate-in fade-in slide-in-from-top-1",
+            {
+              "text-green-600 dark:text-green-400": status === "success",
+              "text-red-600 dark:text-red-400": status === "error",
+              "text-yellow-600 dark:text-yellow-400": status === "warning",
+            }
+          )}
+        >
+          {statusMessage}
+        </p>
+      )}
+    </div>
+  );
+}

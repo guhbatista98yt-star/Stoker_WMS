@@ -1,0 +1,187 @@
+Aja como um Product Owner sênior + Tech Lead + UX/UI Designer especialista em WMS (separação/conferência) para operação em coletor/handheld.
+
+Sua tarefa é produzir uma ESPECIFICAÇÃO COMPLETA e acionável para desenvolvimento, a partir dos requisitos abaixo. Você DEVE entregar uma especificação implementável (não genérica), com regras fechadas, exemplos e critérios de aceitação.
+
+ENTREGÁVEIS OBRIGATÓRIOS (na ordem):
+1) Visão Geral: problema atual, objetivos, não-objetivos e impacto esperado na operação.
+2) Definições Obrigatórias (NÃO INTERPRETAR — DEFINIR COM EXATIDÃO):
+   2.1) Entidades e granularidades: Pedido, Item/SKU, Seção, Operador, Carrinho/Sessão de Separação/Conferência.
+   2.2) Tabela de status por nível:
+        - Status do ITEM (SKU)
+        - Status da SEÇÃO (dentro do pedido)
+        - Status do PEDIDO (agregado)
+   2.3) Regras de agregação do status do pedido (ex.: quando vira “Em separação”, “Separado”, “Pendente a conferência”, etc.) considerando múltiplas seções e múltiplos operadores.
+   2.4) Definir o que significa “Lançado” (booleano) e sua implicação.
+   2.5) Definir as fontes de dados: “Referência” vem da coluna CODIGOINTERNOFORN.
+3) Regras do Período (padronização em TODOS os módulos que buscam pedidos por período, incluindo Separador e Conferente):
+   - Período é apenas “Personalizado (De/Até)”, respeitando o fuso horário da empresa.
+   - Alterar Período NÃO dispara busca.
+   - A busca ocorre SOMENTE ao clicar em “Buscar”.
+   - Importante: isso é SOMENTE para Período; os demais filtros podem manter o comportamento atual (autoaplicar), mas você DEVE declarar explicitamente qual comportamento será adotado por módulo, para evitar inconsistência.
+4) Supervisor > Pedidos (requisitos funcionais + UI):
+   4.1) Filtros (devem existir SOMENTE estes e nenhum outro):
+        - Busca por pedido (somente número do pedido)
+        - Período
+        - Status Financeiro: Pago, Pendente, Bloqueado
+        - Status separação/conferência: Pendente a Separar, Em separação, Separado, Pendente a conferência, Em conferência, Conferido
+        - Rota
+        - Prioridade
+        - Lançado (booleano)
+   4.2) Atualização instantânea:
+        - A lista do supervisor deve refletir instantaneamente qualquer mudança de status disparada por operadores (separação/conferência), inclusive em cenários com múltiplos operadores e seções diferentes.
+        - Você DEVE listar quais campos atualizam (status, timestamps, operador/seção, contadores, etc.) e quais eventos disparam atualizações.
+   4.3) Remover coluna “Código de separação”:
+        - Eliminar a aba/fluxo/campo “Código Sep.” (não necessário e conflita com múltiplos operadores por seções).
+5) Usuario no modulo Separação (Operador) — UI/UX handheld + fluxo “separa por produto”:
+   5.1) UI/UX:
+        - Redesenhar layout para coletor: header não deve atrapalhar (minimizar/ocultar), priorizar legibilidade e velocidade.
+        - Sempre garantir foco no input de leitura (scanner) na aba principal.
+   5.2) Lista de pedidos do operador deve mostrar SOMENTE:
+        - Nº Pedido
+        - Cliente
+        - Quantidade de produtos a separar (somente quantidade dos produtos da seção definida para o operador)
+        - Data e hora do lançamento
+   5.3) Seleção múltipla:
+        - Operador pode selecionar vários pedidos para iniciar.
+        - O fluxo é “separa por produto” (consolidado por SKU), respeitando a(s) seção(ões) do operador.
+        - Você DEVE incluir um EXEMPLO mínimo obrigatório (com 2 pedidos e 2 SKUs) mostrando:
+          - como o SKU aparece consolidado,
+          - como exibir “Nº dos pedidos” que contêm o produto,
+          - como registrar separado por pedido e por SKU,
+          - e como isso impacta o status agregado.
+   5.4) Criar uma Tela/Aba “Separar” (ícone cubo/caixa) — sempre a principal após bip:
+        Ao abrir, mostrar o primeiro produto pendente com informações claras.
+        Exibir:
+        - Nº dos pedidos (dos pedidos selecionados que contêm esse produto)
+        - Código produto
+        - Referência (CODIGOINTERNOFORN)
+        - Código de barras
+        - Código de caixa (se não existir, mostrar “Indisponivel”)
+        - Descrição do produto
+        - Quantidade a separar
+        - Campo quantidade com botões + e - (INATIVOS; obrigar bip)
+        - Nº e descrição da seção do produto
+        - Ícone de exceção (tipos: Não encontrado, Avaria, Vencido; observação não obrigatória; replicar regras já existentes no sistema)
+        - Botão Salvar
+        - Botão Pular (se bipar quantidade total, pular automaticamente)
+        Regras adicionais:
+        - Se bipar quantidade excedente: definir comportamento (bloquear + mensagem, ou permitir somente até o limite).
+   5.5) Criar aba Lista visivel no momento da separação dos produtos (ícone de lista) — visão de todos os produtos do carrinho:
+        Cada linha:
+        - Código do produto
+        - Descrição do produto
+        - Código de barras
+        - Quantidade a separar / separada
+        - Códigos dos pedidos que contêm o produto
+        - Ícone de exceção (sincronizado instantaneamente entre abas)
+        - Ícone verde de confirmado para SKU totalmente separado (definir exatamente o que significa “total”: por seção e/ou por carrinho)
+        Ações:
+        - Selecionar um item na Lista deve levar diretamente para “Separar”.
+   5.6) Operador com múltiplas seções:
+        - A seção do operador vem do cadastro.
+        - Na sub-aba Lista, incluir filtro para visualizar somente produtos da seção desejada.
+        - Mudança de seção no cadastro do usuário:
+          - Se a(s) seção(ões) do usuário forem alteradas, os “produtos pendente a separar” devem atualizar instantaneamente.
+          - Você DEVE definir o comportamento para trabalho “já em andamento” (manter/transferir/bloquear) e destacar impactos.
+   5.7) Comportamento pós-bip e validações:
+        - Sempre que bipar um produto, independente da aba, direcionar para “Separar”.
+        - O bip pode ser por código de barras do produto e/ou código de caixa.
+        - Código inválido: exibir “Produto não encontrado ou código invalido”.
+6) Conferência (Conferente) — cobertura explícita:
+   - Você DEVE especificar o mínimo necessário para o módulo de Conferência, incluindo:
+     - regra do Período idêntica,
+     - estados aplicáveis (Pendente a conferência, Em conferência, Conferido),
+     - fluxo por bip,
+     - e o MESMO padrão de backup/retomada.
+   - Se algum detalhe não existir nos requisitos, crie uma proposta mínima coerente e marque como ASSUNÇÃO.
+7) Tempo Real (Supervisor e sincronização entre telas):
+   - Propor e escolher a abordagem MAIS segura, performática e funcional para “atualização instantânea”:
+     - comparar WebSocket vs SSE, e definir fallback (ex.: polling) + estratégia de reconexão.
+   - Definir SLO alvo (ex.: refletir mudanças no supervisor em até X segundos) e comportamento quando a conexão cair.
+   - Definir eventos (ex.: picking_started, item_picked, exception_created, picking_finished, conference_started, conference_finished, user_section_updated) e payload mínimo.
+8) Concorrência e consistência (múltiplos operadores no mesmo pedido por seções):
+   - Você DEVE apresentar 2 estratégias, comparar e escolher 1 recomendada:
+     A) Lock/Reserva por item/seção ao iniciar carrinho (evita conflito)
+     B) Concorrência otimista (valida e resolve conflito no servidor)
+   - Definir exatamente:
+     - qual é a unidade de lock (SKU? SKU+Seção? Pedido?),
+     - como o sistema evita duplicidade de baixa,
+     - e como o supervisor vê os status corretamente durante o processo.
+9) Regra de Salvar e retorno ao início:
+   - Operador só pode salvar se:
+     - todos os produtos estiverem separados, OU
+     - os que não estiverem tenham exceção registrada.
+   - Ao salvar: voltar imediatamente para a tela inicial (lista de pedidos).
+   - Supervisor deve ver o status atualizado instantaneamente.
+10) Backup/Retomada segura e performática (Separação e Conferência):
+   - Deve funcionar se internet/sistema/navegador cair/fechar.
+   - Sem expiração, mas só usar se houver carrinho/sessão “em andamento” (inicia após bipar e confirmar o carrinho).
+   - Você DEVE especificar:
+     10.1) Onde persistir (recomendação técnica para web/handheld: preferir armazenamento transacional robusto).
+     10.2) Quais campos salvar (pacote mínimo), incluindo obrigatoriamente:
+           - IDs dos pedidos selecionados
+           - seção(ões) do operador e seção ativa no filtro
+           - aba ativa (Separar/Lista)
+           - produto atual (SKU) e posição na fila
+           - quantidades bipadas por SKU (e por pedido quando aplicável)
+           - exceções (tipo + observação)
+           - timestamps de último checkpoint
+           - um identificador/versão do carrinho no servidor (ex.: versão/etag) para detecção de conflito
+     10.3) Checkpoints: quando salvar (a cada bip, a cada exceção, ao mudar produto, ao alternar aba, ao mudar filtro de seção).
+     10.4) Restauração: como voltar exatamente para a mesma tela/aba e mesmo produto.
+     10.5) Conflitos: como resolver quando o servidor já mudou dados enquanto o operador estava offline.
+11) Mensagens e validações (padronização obrigatória):
+   - Você DEVE criar uma tabela: “Condição → Mensagem → Ação do sistema”.
+   - Cobrir pelo menos: código inválido, SKU de outra seção, SKU já finalizado, bip excedente, item inexistente no carrinho, perda de conexão, conflito de versão no servidor, exceção obrigatória para itens não separados.
+12) Backlog:
+   - Épicos → User Stories → Critérios de Aceitação em Gherkin.
+   - Priorizar (P0/P1/P2) e listar dependências.
+13) Plano de testes:
+   - Funcional, usabilidade no coletor, concorrência, offline/intermitência, tempo real, regressão.
+14) Riscos e Dúvidas Abertas:
+   - Se algo estiver indefinido, assumir e marcar como ASSUNÇÃO + impacto.
+   - Listar perguntas objetivas ao stakeholder.
+
+========================
+REQUISITOS FIXOS (não alterar)
+========================
+- Período: Personalizado De/Até, respeita fuso da empresa, só busca no botão “Buscar”, e isso se aplica a todos os módulos que buscam pedidos por período (incluindo separador e conferente).
+- Supervisor filtros somente: número do pedido, período, status financeiro (Pago/Pendente/Bloqueado), status separação/conferência (Pendente a Separar, Em separação, Separado, Pendente a conferência, Em conferência, Conferido), rota, prioridade, lançado (booleano).
+- Supervisor atualiza instantaneamente quando operador altera status.
+- Remover “Código de separação”.
+- Separação UI/UX handheld: reduzir header, fluxo rápido.
+- Lista de pedidos operador: Nº Pedido, Cliente, Qtde produtos a separar (somente da seção do operador), data/hora lançamento.
+- Aba Separar (cubo/caixa) com todos os campos definidos; + e - inativos; bip obrigatório; sem código de caixa mostrar “Indisponivel”.
+- Sub-aba Lista com campos definidos; exceção sincroniza instantaneamente; ícone verde para total separado.
+- Seleção múltipla de pedidos; separa por produto.
+- Multi-seções: filtro por seção na Lista.
+- Selecionar item na Lista leva para Separar; qualquer bip leva para Separar.
+- Código inválido: “Produto não encontrado ou código invalido”.
+- Exceções: Não encontrado, Avaria, Vencido; observação não obrigatória; replicar regras já existentes.
+- Salvar só com tudo separado ou com exceção; ao salvar volta para tela inicial; supervisor vê atualização instantânea.
+- Backup/retomada sem expiração; usado apenas se houver sessão em andamento após confirmar carrinho.
+
+========================
+FORMATO DE SAÍDA (comece assim)
+========================
+Título: Especificação — Padronização do Período + Supervisor/Pedidos + Separação/Conferência (Coletor)
+Seções na ordem:
+Visão Geral
+Definições Obrigatórias
+Regras do Período
+Supervisor/Pedidos
+Separação (UI/UX + Fluxos)
+Conferência (UI/UX + Fluxos)
+Estados e Eventos (máquina de estados + agregação)
+Concorrência (comparação + escolha recomendada)
+Tempo Real (abordagem + fallback + SLO + eventos)
+Backup/Retomada (campos + checkpoints + restauração + conflitos)
+Mensagens e Validações (tabela)
+Backlog (Épicos/Stories/Gherkin)
+Plano de Testes
+Riscos e Dúvidas Abertas
+
+Lembrando que os ajustes e melhorias de separação, é no modulo Separação que fica disponivel somente para os operadores de separação.
+As demais modificações de periodo, e pequenos ajustes são para o Supervisor/Administrador.
+Não deixe lançar novamente pedidos que já foram lançados para separação.
+Use a melhor logica para deixar a separação e conferencia mais segura, perfomatica e funcional.

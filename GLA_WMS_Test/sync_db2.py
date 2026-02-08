@@ -1,0 +1,1108 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Sincronizador DB2 → SQLite para Sales Analytics Dashboard
+Coleta dados do DB2 e salva no database.db local.
+Modo INCREMENTAL: usa CHAVE única para evitar duplicatas.
+
+Uso:
+    python sync_db2.py                        # Sync incremental (última semana)
+    python sync_db2.py --desde 2025-01-01     # Carga desde data específica
+    python sync_db2.py --loop 600             # Sync a cada 10 minutos
+    python sync_db2.py --loop 600 --serve     # Sync + servidor web
+"""
+
+import os
+import sys
+import time
+import sqlite3
+import argparse
+import subprocess
+import threading
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+
+# === MODIFICATION: pyodbc optional ===
+try:
+    import pyodbc
+except ImportError:
+    print("AVISO: pyodbc não instalado. Funcionalidades de DB2 estarão indisponíveis.")
+    pyodbc = None
+# =====================================
+
+# === CONFIGURAÇÃO ===
+STRING_CONEXAO_DB2 = (
+    "DSN=CISSODBC;UID=CONSULTA;PWD=qazwsx@123;"
+    "MODE=SHARE;CLIENTENCALG=2;PROTOCOL=TCPIP;"
+    "TXNISOLATION=1;SERVICENAME=50000;HOSTNAME=192.168.1.200;"
+    "DATABASE=CISSERP;"
+)
+
+QUIET = False
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = SCRIPT_DIR
+DATABASE_PATH = os.path.join(PROJECT_ROOT, "database.db")
+
+
+def log(msg: str):
+    """Log com timestamp."""
+    if QUIET:
+        return
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+# ... (skipping to main)
+
+def main():
+    global QUIET
+    parser = argparse.ArgumentParser(
+        description="Sincronizador DB2 -> SQLite",
+        epilog="""
+Exemplos:
+  python sync_db2.py --serve          # Sync + Servidor (Loop padrão 5 min)
+  python sync_db2.py --loop 600       # Apenas Sync (Loop 10 min)
+  python sync_db2.py --quiet          # Executa sem output
+        """
+    )
+    parser.add_argument("--desde", type=str, metavar="YYYY-MM-DD",
+                        help="Ignorado nesta versão (Janela fixa 31 dias)")
+    parser.add_argument("--loop", type=int, metavar="SEGUNDOS",
+                        help="Intervalo do loop (padrão 300s = 5min)")
+    parser.add_argument("--serve", action="store_true",
+                        help="Inicia o servidor web após sync")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suprime logs no stdout")
+    
+    args = parser.parse_args()
+    
+    if args.quiet:
+        QUIET = True
+    
+    # 1. Sincronização Inicial (Bloqueante)
+    if not QUIET:
+        log("Executando sincronização inicial...")
+    
+    sucesso = sincronizar(data_inicial=args.desde)
+    
+    # 2. Configurar Loop (Thread se Serve, Main se Loop-Only)
+
+
+
+def conectar_db2():
+    """Conecta ao DB2."""
+    if not pyodbc:
+        raise ImportError("pyodbc não instalado")
+    log("Conectando ao DB2...")
+    return pyodbc.connect(STRING_CONEXAO_DB2, timeout=30)
+
+
+def executar_sql_db2(conn, query: str) -> List[Dict[str, Any]]:
+    """Executa SQL no DB2 e retorna lista de dicionários."""
+    cursor = conn.cursor()
+    try:
+        # Define o schema antes de executar a query
+        cursor.execute("SET CURRENT SCHEMA DBA")
+        cursor.execute(query)
+    except Exception as e:
+        log(f"  ERRO SQL: {e}")
+        log(f"  Query (primeiros 500 chars): {query[:500]}...")
+        return []
+    
+    if cursor.description is None:
+        return []
+    
+    colunas = [col[0].strip() for col in cursor.description]
+    rows = cursor.fetchall()
+    return [dict(zip(colunas, row)) for row in rows]
+
+
+def formatar_data(valor) -> str:
+    """Formata data para YYYY-MM-DD."""
+    if valor is None:
+        return ""
+    if hasattr(valor, 'strftime'):
+        return valor.strftime('%Y-%m-%d')
+    return str(valor)[:10]
+
+
+def formatar_hora(valor) -> str:
+    """Formata hora para HH:MM:SS."""
+    if valor is None:
+        return ""
+    if hasattr(valor, 'strftime'):
+        return valor.strftime('%H:%M:%S')
+    return str(valor)[:8]
+
+
+def inicializar_sqlite():
+    """Inicializa o banco SQLite com o schema."""
+    log(f"Inicializando SQLite em {DATABASE_PATH}...")
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    
+
+    
+    # Nova tabela baseada em ORCAMENTO (Window 31 dias)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cache_orcamentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            CHAVE TEXT UNIQUE NOT NULL,
+            IDEMPRESA INTEGER,
+            IDORCAMENTO INTEGER,
+            IDPRODUTO TEXT,
+            IDSUBPRODUTO TEXT,
+            NUMSEQUENCIA INTEGER,
+            QTDPRODUTO REAL,
+            UNIDADE TEXT,
+            FABRICANTE TEXT,
+            VALUNITBRUTO REAL,
+            VALTOTLIQUIDO REAL,
+            DESCRRESPRODUTO TEXT,
+            IDVENDEDOR TEXT,
+            IDLOCALRETIRADA INTEGER,
+            IDSECAO INTEGER,
+            DESCRSECAO TEXT,
+            TIPOENTREGA TEXT,
+            NOMEVENDEDOR TEXT,
+            TIPOENTREGA_DESCR TEXT,
+            LOCALRETESTOQUE TEXT,
+            FLAGCANCELADO TEXT,
+            IDCLIFOR TEXT,
+            DESCLIENTE TEXT,
+            DTMOVIMENTO TEXT,
+            IDRECEBIMENTO TEXT,
+            DESCRRECEBIMENTO TEXT,
+            FLAGPRENOTAPAGA TEXT,
+            CODBARRAS TEXT,
+            CODBARRAS_CAIXA TEXT,
+            sync_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    
+    cursor.execute("DROP TABLE IF EXISTS cache_vendas_pendentes")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cache_vendas_pendentes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            IDEMPRESA INTEGER NOT NULL,
+            CODIGO_VENDEDOR TEXT NOT NULL,
+            NOME_VENDEDOR TEXT NOT NULL,
+            VALOR_TOTAL REAL NOT NULL,
+            sync_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    cursor.execute("DROP TABLE IF EXISTS cache_tubos_conexoes")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cache_tubos_conexoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            IDEMPRESA INTEGER NOT NULL,
+            DT_MOVIMENTO TEXT NOT NULL,
+            IDVENDEDOR TEXT NOT NULL,
+            NOME_VENDEDOR TEXT NOT NULL,
+            VALOR_LIQUIDO REAL NOT NULL,
+            TIPO_PRODUTO TEXT NOT NULL,
+            sync_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS companies (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            cnpj TEXT UNIQUE NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS goals (
+            id TEXT PRIMARY KEY,
+            salesperson_id TEXT NOT NULL,
+            company_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            target_value REAL NOT NULL,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS alerts (
+            id TEXT PRIMARY KEY,
+            company_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            message TEXT NOT NULL,
+            salesperson_id TEXT,
+            severity TEXT DEFAULT 'warning',
+            is_read INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Índices
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_orc_dt ON cache_orcamentos(DTMOVIMENTO)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_orc_vend ON cache_orcamentos(IDVENDEDOR)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_orc_chave ON cache_orcamentos(CHAVE)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cache_pendentes_vendedor ON cache_vendas_pendentes(CODIGO_VENDEDOR)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cache_tubos_vendedor ON cache_tubos_conexoes(IDVENDEDOR)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cache_tubos_type ON cache_tubos_conexoes(TIPO_PRODUTO)")
+    
+    # Create Users Table if not exists
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            sections TEXT,
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id),
+            token TEXT UNIQUE NOT NULL,
+            session_key TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sections (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL
+        )
+    """)
+
+    # Create APPLICATION Tables (Orders, Products, Items, WorkUnits)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id TEXT PRIMARY KEY,
+            erp_code TEXT UNIQUE NOT NULL,
+            barcode TEXT,
+            name TEXT NOT NULL,
+            section TEXT NOT NULL,
+            pickup_point INTEGER NOT NULL,
+            unit TEXT DEFAULT 'UN' NOT NULL,
+            manufacturer TEXT,
+            price REAL DEFAULT 0 NOT NULL,
+            stock_qty REAL DEFAULT 0 NOT NULL,
+            erp_updated_at TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS routes (
+            id TEXT PRIMARY KEY,
+            code TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            active INTEGER DEFAULT 1
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id TEXT PRIMARY KEY,
+            erp_order_id TEXT UNIQUE NOT NULL,
+            customer_name TEXT NOT NULL,
+            customer_code TEXT,
+            total_value REAL DEFAULT 0 NOT NULL,
+            observation TEXT,
+            status TEXT DEFAULT 'pendente' NOT NULL,
+            financial_status TEXT DEFAULT 'pendente' NOT NULL,
+            priority INTEGER DEFAULT 0 NOT NULL,
+            is_launched INTEGER DEFAULT 0 NOT NULL,
+            route_id TEXT REFERENCES routes(id),
+            separation_code TEXT UNIQUE,
+            pickup_points TEXT,
+            erp_updated_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS order_items (
+            id TEXT PRIMARY KEY,
+            order_id TEXT NOT NULL REFERENCES orders(id),
+            product_id TEXT NOT NULL REFERENCES products(id),
+            quantity REAL NOT NULL,
+            separated_qty REAL DEFAULT 0 NOT NULL,
+            checked_qty REAL DEFAULT 0 NOT NULL,
+            status TEXT DEFAULT 'pendente' NOT NULL,
+            pickup_point INTEGER NOT NULL,
+            section TEXT NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS work_units (
+            id TEXT PRIMARY KEY,
+            order_id TEXT REFERENCES orders(id),
+            status TEXT NOT NULL,
+            type TEXT NOT NULL,
+            pickup_point INTEGER,
+            section TEXT,
+            assigned_user_id TEXT REFERENCES users(id),
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            completed_at TEXT,
+            locked_by TEXT REFERENCES users(id),
+            locked_at TEXT,
+            lock_expires_at TEXT,
+            cart_qr_code TEXT,
+            pallet_qr_code TEXT,
+            started_at TEXT
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS exceptions (
+            id TEXT PRIMARY KEY,
+            work_unit_id TEXT NOT NULL REFERENCES work_units(id),
+            order_item_id TEXT NOT NULL REFERENCES order_items(id),
+            type TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            observation TEXT,
+            reported_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id TEXT PRIMARY KEY,
+            user_id TEXT REFERENCES users(id),
+            action TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT,
+            details TEXT,
+            previous_value TEXT,
+            new_value TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+        )
+    """)
+
+    # Ensure Admin/Supervisor User
+    try:
+        # PWD Hash for '1234'
+        pwd_hash = "$2b$10$JLabii4Bj.OxF1DMhJ48V.pB5EKzS0PmA645Bm46pIiiAJv5ls6OO"
+        
+        # 1. Admin
+        cursor.execute("INSERT OR IGNORE INTO users (id, username, password, name, role) VALUES (?, ?, ?, ?, ?)", 
+                       (str(uuid.uuid4()), 'admin', pwd_hash, 'Administrador', 'supervisor'))
+
+        # 2. Gustavo (Separador)
+        cursor.execute("INSERT OR IGNORE INTO users (id, username, password, name, role) VALUES (?, ?, ?, ?, ?)", 
+                       (str(uuid.uuid4()), 'gustavo', pwd_hash, 'Gustavo Separador', 'separacao'))
+
+        log("Usuários admin e gustavo verificados/criados.")
+    except Exception as e:
+        log(f"Nota: Erro ao tentar criar usuários: {e}")
+
+    conn.commit()
+    conn.close()
+    log("Schema SQLite inicializado com sucesso!")
+
+
+def gerar_sql_orcamentos() -> str:
+    """Lê SQL de orçamentos do arquivo .sql"""
+    try:
+        with open('sql/orcamentos.sql', 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        log(f"Erro ao ler sql/orcamentos.sql: {e}")
+        return ""
+
+# (Original query removed)
+
+
+
+def gerar_sql_pendentes() -> str:
+    """Gera SQL de vendas pendentes (a faturar) - orçamentos com pré-nota não paga, por empresa e vendedor."""
+    return """
+WITH OrcamentosPendentes AS (
+    SELECT
+        O.IDORCAMENTO,
+        O.IDEMPRESA,
+        O.IDCLIFOR AS IDCLIENTE,
+        O.DTMOVIMENTO,
+        O.DTVALIDADE
+    FROM DBA.ORCAMENTO O
+    LEFT JOIN DBA.ORCAMENTO_PRE_NOTA OPN
+        ON  OPN.IDORCAMENTO        = O.IDORCAMENTO
+        AND OPN.IDEMPRESAORCAMENTO = O.IDEMPRESA
+    WHERE
+        O.FLAGPRENOTA = 'T'
+        AND O.FLAGPRENOTAPAGA = 'F'
+        AND O.FLAGCANCELADO = 'F'
+        AND O.DTMOVIMENTO >= (CURRENT DATE - 2 DAYS)
+        AND DATE(COALESCE(O.DTVALIDADE, CURRENT DATE)) >= CURRENT DATE
+        AND O.IDEMPRESA IN (1, 3)
+        AND COALESCE(OPN.IDPLANILHAPRENOTA, 0) = 0
+),
+ProdutosPendentesAgregados AS (
+    SELECT
+        OP.IDEMPRESA,
+        OP.IDVENDEDOR,
+        OP.IDORCAMENTO,
+        SUM(OP.VALTOTLIQUIDO) AS VALOR_TOTAL_ORCAMENTO
+    FROM DBA.ORCAMENTO_PROD OP
+    INNER JOIN OrcamentosPendentes OPend
+        ON  OP.IDORCAMENTO = OPend.IDORCAMENTO
+        AND OP.IDEMPRESA   = OPend.IDEMPRESA
+    WHERE
+        OP.IDVENDEDOR IS NOT NULL
+        AND OP.IDVENDEDOR > 0
+    GROUP BY
+        OP.IDEMPRESA,
+        OP.IDVENDEDOR,
+        OP.IDORCAMENTO
+)
+SELECT
+    PPA.IDEMPRESA,
+    PPA.IDVENDEDOR AS CODIGO_VENDEDOR,
+    VEN.NOME AS NOME_VENDEDOR,
+    PPA.VALOR_TOTAL_ORCAMENTO AS VALOR_TOTAL
+FROM ProdutosPendentesAgregados PPA
+LEFT JOIN DBA.CLIENTE_FORNECEDOR VEN
+    ON VEN.IDCLIFOR = PPA.IDVENDEDOR
+WHERE
+    PPA.IDVENDEDOR IN (13656, 1000024, 1005676, 1006781, 1011021, 1000023, 1000020, 1014430)
+ORDER BY
+    PPA.VALOR_TOTAL_ORCAMENTO DESC
+FOR READ ONLY
+"""
+
+
+def gerar_sql_tubos_conexoes() -> str:
+    """Gera SQL de tubos e conexões - último 1 ano automaticamente."""
+    return """
+WITH VendedoresAlvo AS (
+    SELECT
+        IDCLIFOR,
+        NOME
+    FROM
+        DBA.CLIENTE_FORNECEDOR
+    WHERE
+        IDCLIFOR IN (13656, 1000024, 1005676, 1006781, 1011021, 1000023, 1000020, 1014430)
+),
+VendasBrutasPeriodoDetalhe AS (
+    SELECT
+        EA.IDEMPRESA,
+        EA.DTMOVIMENTO,
+        EA.IDVENDEDOR,
+        CF.NOME AS NomeVendedor,
+        CASE
+            WHEN OI.TIPOMOVIMENTO = 'E' THEN EA.VALTOTLIQUIDO * -1
+            ELSE EA.VALTOTLIQUIDO
+        END AS VALOR_LIQUIDO,
+        CASE
+            WHEN LEFT(COALESCE(P.DESCRCOMPRODUTO, '') || ' ' || COALESCE(PG.SUBDESCRICAO, ''), 4) = 'TUBO'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || ' ' || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%EXTENS.%'
+            THEN 'Tubo'
+            WHEN LEFT(COALESCE(P.DESCRCOMPRODUTO, '') || ' ' || COALESCE(PG.SUBDESCRICAO, ''), 4) <> 'TUBO'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || ' ' || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%EXTENS.%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%ADESIVO%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%BOIA%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%FITA%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%4X2%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%VEDACAO%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%CAIXA%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%ESFE%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%LAVAT.%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%ELETROD.%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%QUADRO%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%VALVULA%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%ENGATE%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%TAMPA%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%TORN.%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%FIXACAO%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%RALO%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%GRELHA%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%TELHA%'
+                 AND (COALESCE(P.DESCRCOMPRODUTO, '') || COALESCE(PG.SUBDESCRICAO, '')) NOT LIKE '%CUMEEIRA%'
+            THEN 'Conexao'
+            ELSE 'Outros'
+        END AS TipoProduto
+    FROM
+        DBA.ESTOQUE_ANALITICO EA
+    INNER JOIN DBA.PRODUTO P
+        ON EA.IDPRODUTO = P.IDPRODUTO
+    INNER JOIN DBA.PRODUTO_GRADE PG
+        ON P.IDPRODUTO = PG.IDPRODUTO AND EA.IDSUBPRODUTO = PG.IDSUBPRODUTO
+    INNER JOIN DBA.OPERACAO_INTERNA OI
+        ON EA.IDOPERACAO = OI.IDOPERACAO
+    LEFT JOIN DBA.CLIENTE_FORNECEDOR CF
+        ON EA.IDVENDEDOR = CF.IDCLIFOR
+    WHERE
+        P.FABRICANTE IN ('AMANCO', 'PLASTUBOS', 'KRONA', 'PRECON')
+        AND OI.TIPOMOVIMENTO IN ('V', 'E')
+        AND EA.DTMOVIMENTO BETWEEN DATE(SUBSTR(CHAR(CURRENT DATE - 1 YEAR), 1, 7) || '-01') AND CURRENT DATE
+        AND EA.IDEMPRESA IN (1, 3)
+        AND EA.IDVENDEDOR IN (SELECT IDCLIFOR FROM VendedoresAlvo)
+        AND EA.IDVENDEDOR IS NOT NULL
+        AND EA.IDVENDEDOR > 0
+)
+SELECT
+    IDEMPRESA,
+    DTMOVIMENTO,
+    IDVENDEDOR,
+    NomeVendedor,
+    VALOR_LIQUIDO,
+    TipoProduto
+FROM
+    VendasBrutasPeriodoDetalhe
+WHERE
+    TipoProduto IN ('Tubo', 'Conexao')
+FOR READ ONLY
+"""
+
+
+def sync_orcamentos(conn_db2, conn_sqlite: sqlite3.Connection):
+    """Sincroniza tabela cache_orcamentos (Janela 31 dias)."""
+    cursor = conn_sqlite.cursor()
+    
+    log(f"Sincronizando ORCAMENTOS (Últimos 31 dias)...")
+    query = gerar_sql_orcamentos()
+
+    
+    try:
+        dados = executar_sql_db2(conn_db2, query)
+    except Exception as e:
+        log(f"  ERRO ao executar query: {e}")
+        return
+    
+    log(f"  {len(dados)} registros obtidos do DB2")
+    
+    # ESTRATÉGIA WINDOW SYNC:
+    # 1. Deletar tudo da janela (32 dias pra trás para garantir)
+    # 2. Inserir tudo novo
+    # Isso garante que registros excluídos no DB2 sumam do SQLite.
+    
+    cutoff_date = (datetime.now() - timedelta(days=32)).strftime('%Y-%m-%d')
+    try:
+        cursor.execute("DELETE FROM cache_orcamentos WHERE DTMOVIMENTO >= ?", (cutoff_date,))
+        deleted_count = cursor.rowcount
+        log(f"  {deleted_count} registros removidos da janela local (>= {cutoff_date})")
+    except Exception as e:
+        log(f"  Erro ao limpar janela local: {e}")
+    
+    inseridos = 0
+    erros = 0
+    
+    for row in dados:
+        try:
+            # Gera chave única: EMPRESA-ORC-PROD-SUBPROD-SEQ
+            chave = f"{row.get('IDEMPRESA')}-{row.get('IDORCAMENTO')}-{row.get('IDPRODUTO')}-{row.get('IDSUBPRODUTO')}-{row.get('NUMSEQUENCIA')}"
+            
+            cursor.execute("""
+                INSERT INTO cache_orcamentos (
+                    CHAVE, IDEMPRESA, IDORCAMENTO, IDPRODUTO, IDSUBPRODUTO, NUMSEQUENCIA,
+                    QTDPRODUTO, UNIDADE, FABRICANTE, VALUNITBRUTO, VALTOTLIQUIDO, DESCRRESPRODUTO,
+                    IDVENDEDOR, IDLOCALRETIRADA, IDSECAO, DESCRSECAO,
+                    TIPOENTREGA, NOMEVENDEDOR, TIPOENTREGA_DESCR, LOCALRETESTOQUE,
+                    FLAGCANCELADO, IDCLIFOR, DESCLIENTE, DTMOVIMENTO,
+                    IDRECEBIMENTO, DESCRRECEBIMENTO, FLAGPRENOTAPAGA,
+                    CODBARRAS, CODBARRAS_CAIXA
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                chave,
+                int(row.get('IDEMPRESA', 0)),
+                int(row.get('IDORCAMENTO', 0)),
+                str(row.get('IDPRODUTO', '')),
+                str(row.get('IDSUBPRODUTO', '')),
+                int(row.get('NUMSEQUENCIA', 0)),
+                float(row.get('QTDPRODUTO', 0) or 0),
+                str(row.get('UNIDADE', 'UN') or 'UN'),
+                str(row.get('FABRICANTE', '') or ''), # Capture FABRICANTE
+                float(row.get('VALUNITBRUTO', 0) or 0),
+                float(row.get('VALTOTLIQUIDO', 0) or 0),
+                row.get('DESCRRESPRODUTO', ''),
+                str(row.get('IDVENDEDOR', '')),
+                int(row.get('IDLOCALRETIRADA', 0) or 0),
+                int(row.get('IDSECAO', 0) or 0),
+                row.get('DESCRSECAO', ''),
+                row.get('TIPOENTREGA', ''),
+                row.get('NOMEVENDEDOR', ''),
+                row.get('TIPOENTREGA_DESCR', ''),
+                row.get('LOCALRETESTOQUE', ''),
+                row.get('FLAGCANCELADO', ''),
+                str(row.get('IDCLIFOR', '')),
+                row.get('DESCLIENTE', ''),
+                formatar_data(row.get('DTMOVIMENTO')),
+                str(row.get('IDRECEBIMENTO', '')),
+                row.get('DESCRRECEBIMENTO', ''),
+                row.get('FLAGPRENOTAPAGA', ''),
+                str(row.get('CODBARRAS', '') or ''),
+                str(row.get('CODBARRAS_CAIXA', '') or '')
+            ))
+            inseridos += 1
+                
+        except Exception as e:
+            log(f"  Erro ao inserir registro {chave}: {e}")
+            erros += 1
+    
+    conn_sqlite.commit()
+    log(f"  {inseridos} registros inseridos. {erros} erros.")
+
+
+import uuid
+
+def transform_data(conn_sqlite: sqlite3.Connection):
+    """
+    Transforma dados brutos de cache_orcamentos em orders/products/work_units
+    para uso da aplicação. Otimizado com Bulk Insert.
+    """
+    log("=" * 60)
+    log("TRANSFORMANDO DADOS PARA APLICAÇÃO (OTIMIZADO)")
+    log("=" * 60)
+    
+    cursor = conn_sqlite.cursor()
+    
+    # 1. Obter dados do cache
+    cursor.execute("SELECT * FROM cache_orcamentos")
+    rows = cursor.fetchall()
+    
+    if not rows:
+        return
+        
+    col_names = [description[0] for description in cursor.description]
+    
+    # Pre-loading Existing Data IDs to memory for fast lookup
+    # Sets are O(1)
+    cursor.execute("SELECT erp_order_id, id FROM orders")
+    existing_orders = {r[0]: r[1] for r in cursor.fetchall()}
+    
+    cursor.execute("SELECT erp_code, id FROM products")
+    existing_products = {r[0]: r[1] for r in cursor.fetchall()}
+    
+    # For items, we need to know if (order_id, product_id) exists.
+    # We map (order_uuid, product_uuid) -> item_id
+    cursor.execute("SELECT order_id, product_id FROM order_items")
+    existing_items = set((r[0], r[1]) for r in cursor.fetchall()) # Set of tuples
+    
+    # Work units
+    cursor.execute("SELECT order_id FROM work_units")
+    existing_work_units = set(r[0] for r in cursor.fetchall())
+
+    
+    # Batches for insert
+    upsert_orders = []
+    new_products = []
+    new_items = []
+    new_work_units = []
+    
+    # Helper Data Structures for this Batch
+    # erp_code -> uuid (for things created in this batch)
+    batch_products_map = {} 
+    
+    orders_map = {} # erp_order_id -> {total, items: [], ...}
+
+    # Pass 1: Aggregate Rows into Orders in Memory
+    for row_tuple in rows:
+        row = dict(zip(col_names, row_tuple))
+        
+        id_empresa = str(row.get('IDEMPRESA'))
+        id_orcamento = str(row.get('IDORCAMENTO'))
+        
+        # FIX: Use only IDORCAMENTO for ID, removing company prefix
+        # We still construct a unique key for memory map if needed, but for DB insertion we want simple ID.
+        # But wait, if we have multiple companies, IDORCAMENTO might collide? 
+        # User requested "3-" removal. Assuming IDORCAMENTO is unique enough or we only filter Company 3.
+        # Let's use simple ID for display but keep internal uniqueness if possible?
+        # Actually, user wants "somente o ID do pedido".
+        erp_order_id = id_orcamento 
+        
+        # Internal unique key for map (in case of collision across companies, though we filter company 3)
+        map_key = f"{id_empresa}-{id_orcamento}"
+        
+        if map_key not in orders_map:
+            orders_map[map_key] = {
+                'erp_id_display': erp_order_id, # Store for insertion
+                'customer_name': row.get('DESCLIENTE') or 'Cliente Desconhecido',
+                'customer_code': str(row.get('IDCLIFOR') or ''),
+                'total_value': 0.0,
+                'items': [],
+                'created_at': row.get('DTMOVIMENTO'),
+                'pickup_point': row.get('IDLOCALRETIRADA'), # Capture for WO
+                'section': row.get('IDSECAO'), # Capture for WO
+                'flag_pre_nota_paga': row.get('FLAGPRENOTAPAGA')
+            }
+        
+        # FIX: Value is 100x too high (e.g. 22680.00 instead of 226.80)
+        # Assuming DB2 stores as generic float but logic was off? Or it's integer cents?
+        # User said "reas". If 22680 comes in, it should be 226.80. So divide by 100.
+        val_liq = float(row.get('VALTOTLIQUIDO') or 0) / 100.0
+        
+        orders_map[map_key]['total_value'] += val_liq
+        orders_map[map_key]['items'].append(row)
+
+    # Pass 2: Process Aggregated Orders
+    for map_key, data in orders_map.items():
+        
+        erp_order_id = data['erp_id_display']
+        
+        # --- ORDER ---
+        # Note: erp_order_id (IDORCAMENTO) needs to be unique in `orders` table.
+        # If we have same ID in different companies, this might crash schema unique constraint.
+        # But we only sync Company 3, so it is fine.
+        order_uuid = existing_orders.get(erp_order_id)
+        if not order_uuid:
+            order_uuid = str(uuid.uuid4())
+            existing_orders[erp_order_id] = order_uuid # Add to separate lookups if needed later?
+            
+        # Map Financial Status
+        # FLAGPRENOTAPAGA: 'T' -> 'faturado', 'F' -> 'pendente'
+        fin_status = 'faturado' if data.get('flag_pre_nota_paga') == 'T' else 'pendente'
+
+        # Always add to upsert list (Update existing ones too)
+        upsert_orders.append((
+            order_uuid, erp_order_id, data['customer_name'], data['customer_code'], 
+            data['total_value'], fin_status, data.get('created_at')
+        ))
+        
+        # --- WORK UNIT (1 per Order) ---
+        if order_uuid not in existing_work_units:
+             new_work_units.append((
+                 str(uuid.uuid4()), order_uuid, data.get('pickup_point') or 0, str(data.get('section') or '')
+             ))
+             existing_work_units.add(order_uuid)
+             
+        # --- ITEMS ---
+        for item in data['items']:
+            erp_prod_code = str(item.get('IDPRODUTO'))
+            
+            # Product UUID
+            prod_uuid = existing_products.get(erp_prod_code)
+            
+            # Use Fetched Unit
+            unit = item.get('UNIDADE') or 'UN'
+            manufacturer = item.get('FABRICANTE') or ''
+            
+            # FIX: Quantity logic (Divide by 1000)
+            raw_qty = float(item.get('QTDPRODUTO') or 0)
+            real_qty = raw_qty / 1000.0
+
+            if not prod_uuid:
+                # Check batch
+                prod_uuid = batch_products_map.get(erp_prod_code)
+                if not prod_uuid:
+                    prod_uuid = str(uuid.uuid4())
+                    new_products.append((
+                        prod_uuid, erp_prod_code, item.get('CODBARRAS'), item.get('CODBARRAS_CAIXA'), item.get('DESCRRESPRODUTO'), 
+                        str(item.get('IDSECAO')), item.get('IDLOCALRETIRADA'),
+                        unit, 
+                        manufacturer,
+                        item.get('VALUNITBRUTO')
+                    ))
+                    batch_products_map[erp_prod_code] = prod_uuid
+            
+            # Item Relation
+            if (order_uuid, prod_uuid) not in existing_items:
+                new_items.append((
+                    str(uuid.uuid4()), order_uuid, prod_uuid, real_qty, # Use real_qty
+                    item.get('IDLOCALRETIRADA'), str(item.get('IDSECAO'))
+                ))
+                existing_items.add((order_uuid, prod_uuid)) # Prevent dupes within batch if source has dupes
+                
+    # 3. Bulk Inserts
+    try:
+        if new_products:
+            # Update INSERT to use dynamic unit
+            cursor.executemany("""
+                INSERT OR IGNORE INTO products (id, erp_code, barcode, box_barcode, name, section, pickup_point, unit, manufacturer, price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, new_products)
+            
+        if upsert_orders:
+            # Upsert Logic: Update Financial Status if order exists
+            cursor.executemany("""
+                INSERT INTO orders (id, erp_order_id, customer_name, customer_code, total_value, financial_status, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'pendente', ?)
+                ON CONFLICT(erp_order_id) DO UPDATE SET
+                    financial_status = excluded.financial_status,
+                    total_value = excluded.total_value,
+                    customer_name = excluded.customer_name,
+                    updated_at = CURRENT_TIMESTAMP
+            """, upsert_orders)
+            
+        if new_items:
+            # Note: order_items usually doesn't have unique constraint on (order,product) in schema unless we added it?
+            # Schema says: id is PK. No unique on pair.
+            # But we filtered using existing_items set, so we are safe from duplication against DB.
+            cursor.executemany("""
+                INSERT INTO order_items (id, order_id, product_id, quantity, separated_qty, status, pickup_point, section)
+                VALUES (?, ?, ?, ?, 0, 'pendente', ?, ?)
+            """, new_items)
+            
+        if new_work_units:
+            cursor.executemany("""
+                INSERT INTO work_units (id, order_id, status, type, pickup_point, section)
+                VALUES (?, ?, 'pendente', 'separacao', ?, ?)
+            """, new_work_units)
+
+        conn_sqlite.commit()
+        
+        # Log Summary
+        log(f"Base de Dados: {len(existing_orders)} Pedidos processados.")
+        log(f"Transformação Completa: {len(upsert_orders)} Pedidos sincronizados (upsert), {len(new_items)} Novos itens.")
+        
+    except Exception as e:
+        log(f"Erro no Bulk Insert: {e}")
+        import traceback
+        traceback.print_exc()
+
+def kill_port_411():
+    """Mata processo usando a porta 411 (Windows) para evitar EADDRINUSE."""
+    if sys.platform == "win32":
+        try:
+            # Encontrar PID
+            result = subprocess.run('netstat -ano | findstr :411', shell=True, capture_output=True, text=True)
+            output = result.stdout.strip()
+            if output:
+                lines = output.split('\n')
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        pid = parts[-1] 
+                        if pid != '0':
+                            log(f"Porta 411 em uso pelo PID {pid}. Matando...")
+                            subprocess.run(f'taskkill /F /PID {pid}', shell=True, capture_output=True)
+        except Exception as e:
+            log(f"Aviso: Não foi possível limpar porta 411: {e}")
+
+def sync_pendentes(conn_db2, conn_sqlite: sqlite3.Connection):
+    """Sincroniza tabela cache_vendas_pendentes (sempre substitui)."""
+    cursor = conn_sqlite.cursor()
+    
+    log("Sincronizando VENDAS_PENDENTES (substituindo dados atuais)...")
+    
+    try:
+        dados = executar_sql_db2(conn_db2, gerar_sql_pendentes())
+    except Exception as e:
+        log(f"  ERRO ao executar query: {e}")
+        return
+    
+    log(f"  {len(dados)} registros obtidos do DB2")
+    
+    cursor.execute("DELETE FROM cache_vendas_pendentes")
+    
+    inseridos = 0
+    for row in dados:
+        try:
+            valor_total = float(row.get('VALOR_TOTAL', 0) or 0) / 100
+            cursor.execute("""
+                INSERT INTO cache_vendas_pendentes (IDEMPRESA, CODIGO_VENDEDOR, NOME_VENDEDOR, VALOR_TOTAL)
+                VALUES (?, ?, ?, ?)
+            """, (
+                int(row.get('IDEMPRESA', 1) or 1),
+                str(row.get('CODIGO_VENDEDOR', '')),
+                row.get('NOME_VENDEDOR', ''),
+                valor_total,
+            ))
+            inseridos += 1
+            log(f"    Vendedor {row.get('NOME_VENDEDOR', '')}: R$ {valor_total:,.2f}")
+        except Exception as e:
+            log(f"  Erro ao inserir: {e}")
+    
+    conn_sqlite.commit()
+    log(f"  {inseridos} registros salvos em cache_vendas_pendentes")
+
+
+def sync_tubos_conexoes(conn_db2, conn_sqlite: sqlite3.Connection):
+    """Sincroniza tabela cache_tubos_conexoes (sempre substitui - último 1 ano)."""
+    cursor = conn_sqlite.cursor()
+    
+    log("Sincronizando TUBOS_CONEXOES (último 1 ano)...")
+    
+    try:
+        dados = executar_sql_db2(conn_db2, gerar_sql_tubos_conexoes())
+    except Exception as e:
+        log(f"  ERRO ao executar query: {e}")
+        return
+    
+    log(f"  {len(dados)} registros obtidos do DB2")
+    
+    cursor.execute("DELETE FROM cache_tubos_conexoes")
+    
+    inseridos = 0
+    for row in dados:
+        try:
+            cursor.execute("""
+                INSERT INTO cache_tubos_conexoes (IDEMPRESA, DT_MOVIMENTO, IDVENDEDOR, NOME_VENDEDOR, VALOR_LIQUIDO, TIPO_PRODUTO)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                int(row.get('IDEMPRESA', 1) or 1),
+                formatar_data(row.get('DTMOVIMENTO')),
+                str(row.get('IDVENDEDOR', '')),
+                row.get('NomeVendedor', '') or row.get('NOMEVENDEDOR', ''),
+                float(row.get('VALOR_LIQUIDO', 0) or 0) / 1000000,
+                row.get('TipoProduto', '') or row.get('TIPOPRODUTO', ''),
+            ))
+            inseridos += 1
+        except Exception as e:
+            log(f"  Erro ao inserir: {e}")
+    
+    conn_sqlite.commit()
+    log(f"  {inseridos} registros salvos em cache_tubos_conexoes")
+
+
+def sincronizar(data_inicial: Optional[str] = None) -> bool:
+    """Executa sincronização completa."""
+    log("=" * 60)
+    log("INICIANDO SINCRONIZAÇÃO DB2 -> SQLite (Window)")
+    log("=" * 60)
+    
+    inicializar_sqlite()
+    
+    if not pyodbc:
+        log("AVISO: Driver DB2 (pyodbc) não encontrado. Pular sincronização.")
+        return True
+
+    try:
+        conn_db2 = conectar_db2()
+        log("Conectado ao DB2 com sucesso!")
+    except Exception as e:
+        log(f"ERRO ao conectar ao DB2: {e}")
+        return False
+    
+    try:
+        conn_sqlite = sqlite3.connect(DATABASE_PATH)
+        log(f"Conectado ao SQLite: {DATABASE_PATH}")
+        
+        inicio = time.time()
+        
+        sync_orcamentos(conn_db2, conn_sqlite)
+        transform_data(conn_sqlite)
+        # sync_pendentes(conn_db2, conn_sqlite) -- DISABLED
+        # sync_tubos_conexoes(conn_db2, conn_sqlite) -- DISABLED
+        
+        duracao = time.time() - inicio
+        log(f"Sincronização concluída em {duracao:.2f} segundos")
+        log("=" * 60)
+        
+        conn_db2.close()
+        conn_sqlite.close()
+        return True
+        
+    except Exception as e:
+        log(f"ERRO DB2: {e}")
+        return False
+    except Exception as e:
+        log(f"ERRO: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def iniciar_servidor():
+    """Inicia o servidor web do dashboard."""
+    log("Iniciando servidor web...")
+    os.chdir(PROJECT_ROOT)
+    
+    is_windows = sys.platform == "win32"
+    
+    try:
+        subprocess.run("npm --version", shell=True, capture_output=True, check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        log("ERRO: npm não encontrado. Instale Node.js primeiro.")
+        log("Baixe em: https://nodejs.org/")
+        return
+    
+    log(f"Acesse: http://localhost:411")
+    
+    # Auto-fix port
+    kill_port_411()
+    
+    if is_windows:
+        log("Executando servidor (Windows)...")
+        env = os.environ.copy()
+        env["NODE_ENV"] = "development"
+        env["PORT"] = "411"
+        try:
+            subprocess.run("npx tsx server/index.ts", shell=True, cwd=PROJECT_ROOT, env=env)
+        except KeyboardInterrupt:
+            log("\nServidor interrompido pelo usuário.")
+    else:
+        log("Executando: npm run dev")
+        env = os.environ.copy()
+        env["PORT"] = "411"
+        try:
+            subprocess.run("npm run dev", shell=True, cwd=PROJECT_ROOT, env=env)
+        except KeyboardInterrupt:
+            log("\nServidor interrompido pelo usuário.")
+
+
+def loop_sync(intervalo: int, data_inicial: Optional[str] = None):
+    """Executa sync em loop (para rodar em thread separada)."""
+    while True:
+        time.sleep(intervalo)
+        log(f"Sincronização incremental automática...")
+        sincronizar(data_inicial=None)  # Incremental após a primeira
+        log(f"Próxima sync em {intervalo} segundos ({intervalo//60} min)")
+
+
+def main():
+    global QUIET
+    parser = argparse.ArgumentParser(
+        description="Sincronizador DB2 -> SQLite",
+        epilog="""
+Exemplos:
+  python sync_db2.py --serve          # Sync + Servidor (Loop padrão 5 min)
+  python sync_db2.py --loop 600       # Apenas Sync (Loop 10 min)
+        """
+    )
+    parser.add_argument("--desde", type=str, metavar="YYYY-MM-DD",
+                        help="Ignorado nesta versão (Janela fixa 31 dias)")
+    parser.add_argument("--loop", type=int, metavar="SEGUNDOS",
+                        help="Intervalo do loop (padrão 300s = 5min)")
+    parser.add_argument("--serve", action="store_true",
+                        help="Inicia o servidor web após sync")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suprime logs no stdout")
+    
+    args = parser.parse_args()
+
+    if args.quiet:
+        QUIET = True
+    
+    # 1. Sincronização Inicial (Bloqueante)
+    log("Executando sincronização inicial...")
+    sucesso = sincronizar(data_inicial=args.desde)
+    
+    # 2. Configurar Loop (Thread se Serve, Main se Loop-Only)
+    intervalo = args.loop or 300
+    
+    should_loop = args.serve or args.loop
+    
+    if args.serve:
+        # Servidor Ativo: Loop em Thread Daemon
+        t = threading.Thread(target=loop_sync, args=(intervalo, args.desde), daemon=True)
+        t.start()
+        
+        log("Iniciando servidor na porta 411...")
+        iniciar_servidor()
+
+    elif args.loop:
+        # Apenas Loop (Bloqueante)
+        try:
+            loop_sync(intervalo, args.desde)
+        except KeyboardInterrupt:
+            log("\nLoop interrompido pelo usuário.")
+        
+    else:
+        # Apenas Uma Execução
+        if not sucesso:
+            sys.exit(1)
+            
+if __name__ == "__main__":
+    main()

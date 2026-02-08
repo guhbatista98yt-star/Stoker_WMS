@@ -1,0 +1,86 @@
+# GLA WMS - Warehouse Management System
+
+## Overview
+
+GLA WMS is a warehouse management system designed for logistics operations in Brazil. The application handles order picking (separação), verification (conferência), and counter service (balcão) workflows. It features role-based access control with distinct interfaces for supervisors and operators, real-time work unit locking to prevent concurrent operations on the same orders, and barcode scanning integration for mobile collector devices.
+
+The system follows a dual-database architecture pattern with PostgreSQL as the operational database, supporting ERP synchronization via a staging layer concept. Work units represent atomic tasks that can be locked, tracked through state machines, and audited for accountability.
+
+## User Preferences
+
+Preferred communication style: Simple, everyday language.
+
+## System Architecture
+
+### Frontend Architecture
+- **Framework**: React 18 with TypeScript
+- **Routing**: Wouter (lightweight alternative to React Router)
+- **State Management**: TanStack React Query for server state with controlled caching per session
+- **UI Components**: shadcn/ui (Radix primitives) with Tailwind CSS and CSS custom properties for theming
+- **Form Handling**: React Hook Form with Zod validation
+- **Date Utilities**: date-fns
+
+The frontend is organized with pages under `client/src/pages/` grouped by role (supervisor, separacao, conferencia, balcao). Reusable UI components are in `client/src/components/ui/` following shadcn conventions. Custom application components include scan input for barcode readers, status badges, action tiles, and gradient headers.
+
+### Backend Architecture
+- **Runtime**: Node.js with Express (ESM modules)
+- **Language**: TypeScript
+- **Database ORM**: Drizzle ORM with PostgreSQL
+- **Authentication**: JWT tokens stored in HttpOnly cookies with bcrypt password hashing
+- **Session Management**: Custom session table with tokens, session keys, and expiration
+
+Routes are registered in `server/routes.ts` and follow RESTful patterns under `/api/*`. The storage layer (`server/storage.ts`) implements an `IStorage` interface that abstracts all database operations, separating business logic from data access.
+
+### Authentication and Authorization
+- Role-based access control with four roles: `supervisor`, `separacao`, `conferencia`, `balcao`
+- Middleware functions `isAuthenticated`, `requireRole` protect routes
+- Sessions include a unique session key for cache invalidation on logout
+- 24-hour token expiry with cookie-based storage
+
+### Work Unit and Locking System
+- Work units represent atomic tasks derived from orders
+- Lock mechanism with TTL (15 minutes default) prevents concurrent operations
+- Heartbeat system extends locks for active sessions
+- Force unlock capability for supervisors
+- State machine for work units: `pendente` → `em_andamento` → `concluido` (with `recontagem` and `excecao` branches)
+
+### Database Schema
+Tables defined in `shared/schema.ts`:
+- `users` - User accounts with roles and section assignments
+- `orders` - Orders synced from ERP with status tracking
+- `orderItems` - Line items with separation/verification status
+- `products` - Product catalog with barcodes and pickup locations
+- `routes` - Delivery routes for order grouping
+- `workUnits` - Atomic work tasks with locking fields
+- `exceptions` - Exception records (not found, damaged, expired)
+- `auditLogs` - Operation audit trail
+- `sessions` - Authentication sessions
+
+### Build System
+- **Development**: Vite dev server with HMR, proxied through Express
+- **Production**: esbuild bundles the server, Vite builds the client to `dist/public`
+- Custom build script in `script/build.ts` handles both frontend and backend bundling
+
+## External Dependencies
+
+### Database
+- **PostgreSQL**: Primary operational database
+- Connection via `DATABASE_URL` environment variable
+- Drizzle Kit for migrations (`drizzle-kit push`)
+- Connection pooling with `pg` package
+
+### Third-Party Services
+- No external API integrations currently implemented
+- Architecture supports ERP synchronization via staging database pattern (sync logic to be implemented)
+
+### Key npm Packages
+- `drizzle-orm` / `drizzle-kit` - Database ORM and migrations
+- `bcrypt` - Password hashing
+- `cookie-parser` - Cookie handling for auth tokens
+- `zod` - Schema validation for API payloads
+- `@tanstack/react-query` - Server state management
+- Full Radix UI primitive suite via shadcn/ui components
+
+### Development Tools
+- `@replit/vite-plugin-runtime-error-modal` - Runtime error display
+- `@replit/vite-plugin-cartographer` - Development navigation (Replit-specific)
