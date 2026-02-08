@@ -8,6 +8,7 @@ import {
   Store,
   Settings,
   LogOut,
+  ClipboardList,
 } from "lucide-react";
 
 export default function HomePage() {
@@ -38,6 +39,12 @@ export default function HomePage() {
         title: "Balcão",
         description: "Atendimento ao cliente",
         href: "/balcao",
+      },
+      {
+        icon: ClipboardList,
+        title: "Fila de Pedidos",
+        description: "Acompanhamento em tempo real",
+        href: "/fila-pedidos",
       },
     ],
     supervisor: [
@@ -70,6 +77,14 @@ export default function HomePage() {
         title: "Balcão",
         description: "Atendimento ao cliente",
         href: "/balcao",
+      },
+    ],
+    fila_pedidos: [
+      {
+        icon: ClipboardList,
+        title: "Fila de Pedidos",
+        description: "Acompanhamento em tempo real",
+        href: "/fila-pedidos",
       },
     ],
   };

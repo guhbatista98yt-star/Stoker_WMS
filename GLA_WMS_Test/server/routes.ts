@@ -351,6 +351,54 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/queue/balcao", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const wus = await storage.getWorkUnits("balcao");
+      const activeOrders = new Map<string, {
+        orderId: string;
+        erpOrderId: string;
+        customerCode: string | null;
+        customerName: string;
+        vendedor: string | null;
+        totalProducts: number;
+        financialStatus: string;
+        status: string;
+        operatorName: string | null;
+        startedAt: string | null;
+        lockedAt: string | null;
+      }>();
+
+      for (const wu of wus) {
+        if (!wu.lockedBy || wu.status === "concluido") continue;
+        if (wu.order.status === "finalizado") continue;
+
+        const existing = activeOrders.get(wu.orderId);
+        if (!existing) {
+          activeOrders.set(wu.orderId, {
+            orderId: wu.orderId,
+            erpOrderId: wu.order.erpOrderId,
+            customerCode: wu.order.customerCode,
+            customerName: wu.order.customerName,
+            vendedor: wu.order.observation || null,
+            totalProducts: wu.items.length,
+            financialStatus: wu.order.financialStatus || "pendente",
+            status: wu.order.status,
+            operatorName: wu.lockedByName || null,
+            startedAt: wu.startedAt || wu.lockedAt || null,
+            lockedAt: wu.lockedAt || null,
+          });
+        } else {
+          existing.totalProducts += wu.items.length;
+        }
+      }
+
+      res.json(Array.from(activeOrders.values()));
+    } catch (error) {
+      console.error("Get balcao queue error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
   app.get("/api/pickup-points", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const result = await db.selectDistinct({ pickupPoint: orderItems.pickupPoint }).from(orderItems).orderBy(orderItems.pickupPoint);

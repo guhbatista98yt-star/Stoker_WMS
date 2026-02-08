@@ -25,6 +25,7 @@ import {
   ArrowRight,
   Calendar,
   Timer,
+  Lock,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import type { WorkUnitWithDetails, OrderItem, Product, ExceptionType, UserSettings } from "@shared/schema";
@@ -391,8 +392,7 @@ export default function BalcaoPage() {
     return workUnits?.filter((wu) => {
       if (wu.order.status === "finalizado") return false;
       if (wu.status === "concluido") return false;
-      if (wu.lockedBy && wu.lockedBy !== user?.id) return false;
-      if (!wu.order.isLaunched) return false;
+      if (wu.order.isLaunched) return false;
 
       if (filterOrderId && !wu.order.erpOrderId.toLowerCase().includes(filterOrderId.toLowerCase())) return false;
 
@@ -423,7 +423,9 @@ export default function BalcaoPage() {
   }, [availableWorkUnits]);
 
   const handleSelectGroup = (wus: typeof availableWorkUnits, checked: boolean) => {
-    const ids = wus.map((wu) => wu.id);
+    const filteredWus = wus.filter(wu => !wu.lockedBy || wu.lockedBy === user?.id);
+    if (filteredWus.length === 0) return;
+    const ids = filteredWus.map((wu) => wu.id);
     if (checked) {
       setSelectedWorkUnits((prev) => Array.from(new Set([...prev, ...ids])));
     } else {
@@ -715,6 +717,8 @@ export default function BalcaoPage() {
                 const firstWU = group[0];
                 const groupIds = group.map(g => g.id);
                 const isSelected = groupIds.every(id => selectedWorkUnits.includes(id));
+                const lockedByOther = group.some(wu => wu.lockedBy && wu.lockedBy !== user?.id);
+                const lockerName = group.find(wu => wu.lockedBy && wu.lockedBy !== user?.id)?.lockedByName;
 
                 const totalItems = group.reduce((acc, wu) => {
                   const items = wu.items || [];
@@ -731,19 +735,28 @@ export default function BalcaoPage() {
                 return (
                   <div
                     key={firstWU.orderId}
-                    className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${isSelected ? "border-amber-500 bg-amber-500/5" : "border-border"}`}
-                    onClick={() => handleSelectGroup(group, !isSelected)}
+                    className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${lockedByOther ? "opacity-50 cursor-not-allowed border-border" : isSelected ? "border-amber-500 bg-amber-500/5" : "border-border"}`}
+                    onClick={() => !lockedByOther && handleSelectGroup(group, !isSelected)}
                     data-testid={`order-group-${firstWU.orderId}`}
                   >
-                    <Checkbox
-                      checked={isSelected}
-                      onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
-                      className="shrink-0"
-                      data-testid={`checkbox-order-${firstWU.orderId}`}
-                    />
+                    {!lockedByOther ? (
+                      <Checkbox
+                        checked={isSelected}
+                        onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
+                        className="shrink-0"
+                        data-testid={`checkbox-order-${firstWU.orderId}`}
+                      />
+                    ) : (
+                      <Lock className="h-4 w-4 shrink-0 text-amber-500" />
+                    )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
                         <span className="font-mono text-sm font-semibold">{firstWU.order.erpOrderId}</span>
+                        {lockedByOther && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                            Em balcão por: {lockerName}
+                          </span>
+                        )}
                       </div>
                       <p className="text-xs text-muted-foreground truncate">{firstWU.order.customerName}</p>
                     </div>

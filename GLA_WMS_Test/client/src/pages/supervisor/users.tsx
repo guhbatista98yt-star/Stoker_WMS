@@ -79,6 +79,7 @@ const roleLabels: Record<string, { label: string; color: string }> = {
   separacao: { label: "Separação", color: "bg-blue-100 text-blue-700" },
   conferencia: { label: "Conferência", color: "bg-teal-100 text-teal-700" },
   balcao: { label: "Balcão", color: "bg-orange-100 text-orange-700" },
+  fila_pedidos: { label: "Fila de Pedidos", color: "bg-amber-100 text-amber-700" },
 };
 
 export default function UsersPage() {
@@ -417,6 +418,7 @@ export default function UsersPage() {
                         <SelectItem value="separacao">Separação</SelectItem>
                         <SelectItem value="conferencia">Conferência</SelectItem>
                         <SelectItem value="balcao">Balcão</SelectItem>
+                        <SelectItem value="fila_pedidos">Fila de Pedidos</SelectItem>
                       </SelectContent>
                     </Select>
                     <FormMessage />
@@ -606,6 +608,7 @@ export default function UsersPage() {
                         <SelectItem value="separacao">Separação</SelectItem>
                         <SelectItem value="conferencia">Conferência</SelectItem>
                         <SelectItem value="balcao">Balcão</SelectItem>
+                        <SelectItem value="fila_pedidos">Fila de Pedidos</SelectItem>
                       </SelectContent>
                     </Select>
                     <FormMessage />

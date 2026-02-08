@@ -5,7 +5,7 @@ import { z } from "zod";
 const boolean = (name: string) => pgBoolean(name);
 const timestamp = (name: string) => text(name);
 
-export const userRoleEnum = ["administrador", "supervisor", "separacao", "conferencia", "balcao"] as const;
+export const userRoleEnum = ["administrador", "supervisor", "separacao", "conferencia", "balcao", "fila_pedidos"] as const;
 export type UserRole = typeof userRoleEnum[number];
 
 export const orderStatusEnum = ["pendente", "em_separacao", "separado", "em_conferencia", "conferido", "finalizado", "cancelado"] as const;
@@ -310,6 +310,7 @@ export type WorkUnitWithDetails = WorkUnit & {
   order: Order;
   items: (OrderItem & { product: Product })[];
   lockedByUser?: User | null;
+  lockedByName?: string;
 };
 
 export type Section = typeof sections.$inferSelect;

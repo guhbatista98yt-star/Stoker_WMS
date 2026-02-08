@@ -41,6 +41,9 @@ import {
   Loader2,
   Info,
   Zap,
+  HelpCircle,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { Link } from "wouter";
 import type { DataContractField, MappingField, Db2Mapping } from "@shared/schema";
@@ -75,6 +78,7 @@ export default function MappingStudioPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewData, setPreviewData] = useState<any>(null);
   const [description, setDescription] = useState("");
+  const [showHelp, setShowHelp] = useState(false);
 
   const datasetsQueryKey = useSessionQueryKey(["/api/datasets"]);
   const { data: datasets, isLoading: datasetsLoading } = useQuery<DatasetInfo[]>({
@@ -191,6 +195,49 @@ export default function MappingStudioPage() {
       </GradientHeader>
 
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+        <div className="border border-blue-200 bg-blue-50 rounded-lg">
+          <button
+            onClick={() => setShowHelp(!showHelp)}
+            className="w-full flex items-center justify-between px-4 py-3 text-left"
+          >
+            <div className="flex items-center gap-2 text-blue-700 font-medium text-sm">
+              <HelpCircle className="h-4 w-4" />
+              Como usar o Mapping Studio
+            </div>
+            {showHelp ? <ChevronUp className="h-4 w-4 text-blue-500" /> : <ChevronDown className="h-4 w-4 text-blue-500" />}
+          </button>
+          {showHelp && (
+            <div className="px-4 pb-4 text-sm text-blue-900 space-y-3 border-t border-blue-200 pt-3">
+              <div>
+                <p className="font-semibold mb-1">O que é o Mapping Studio?</p>
+                <p>O Mapping Studio permite configurar como os dados do ERP (DB2) são mapeados para o sistema GLA Stock, sem precisar alterar o código. Sempre que a sincronização rodar, ela usará o mapeamento ativo para transformar os dados.</p>
+              </div>
+              <div>
+                <p className="font-semibold mb-1">Passo a passo:</p>
+                <ol className="list-decimal pl-5 space-y-1">
+                  <li><strong>Selecione o Dataset</strong> — Escolha qual tipo de dado quer mapear: Pedidos, Produtos ou Itens do Pedido.</li>
+                  <li><strong>Veja as Colunas do DB2</strong> — Na seção "Colunas Disponíveis", passe o mouse sobre cada coluna para ver um exemplo do valor. Use esses nomes exatos no campo "Expressão DB2".</li>
+                  <li><strong>Preencha o Mapeamento</strong> — Para cada campo do sistema (Campo App), informe a coluna correspondente do DB2 no campo "Expressão DB2 (coluna)". Campos obrigatórios estão marcados com "Sim".</li>
+                  <li><strong>Configure a Conversão</strong> — Se necessário, escolha uma conversão: "string" (texto), "number" (número), "divide_100" (dividir por 100), "divide_1000" (dividir por 1000), "boolean_T_F" (verdadeiro/falso).</li>
+                  <li><strong>Valor Padrão</strong> — Defina um valor padrão caso a coluna do DB2 venha vazia.</li>
+                  <li><strong>Testar / Preview</strong> — Clique em "Testar / Preview" para visualizar como os dados ficarão após a transformação. Verifique se os valores estão corretos.</li>
+                  <li><strong>Salvar</strong> — Quando estiver satisfeito, clique em "Salvar Mapping". Uma nova versão será criada.</li>
+                  <li><strong>Ativar</strong> — Após salvar, ative o mapeamento para que a sincronização passe a usá-lo. Se o mapeamento não estiver ativo, o sistema usará o mapeamento padrão do código.</li>
+                </ol>
+              </div>
+              <div>
+                <p className="font-semibold mb-1">Dicas importantes:</p>
+                <ul className="list-disc pl-5 space-y-1">
+                  <li>Sempre faça um "Testar / Preview" antes de salvar para garantir que os dados estão corretos.</li>
+                  <li>Apenas um mapeamento pode estar ativo por dataset. Ao ativar um novo, o anterior é desativado automaticamente.</li>
+                  <li>O campo "Descrição" ajuda a identificar cada versão do mapeamento.</li>
+                  <li>Work Units (unidades de trabalho) são geradas automaticamente a partir dos pedidos — não precisam de mapeamento separado.</li>
+                </ul>
+              </div>
+            </div>
+          )}
+        </div>
+
         <SectionCard
           title="Selecionar Dataset"
           icon={<Database className="h-4 w-4 text-primary" />}
