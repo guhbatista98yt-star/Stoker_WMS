@@ -204,10 +204,9 @@ export default function SupervisorDashboard() {
           />
           <ActionTile
             icon={Settings}
-            title="Configurações"
-            description="Ajustes do sistema"
-            href="/supervisor/settings"
-            disabled
+            title="Mapping Studio"
+            description="Mapeamento DB2 → App"
+            href="/supervisor/mapping-studio"
           />
         </section>
 

@@ -1,12 +1,13 @@
 import { db } from "./db";
 import { eq, and, sql, desc, inArray, isNull, gt, lt } from "drizzle-orm";
 import {
-  users, orders, orderItems, products, routes, workUnits, exceptions, auditLogs, sessions, sections, sectionGroups, manualQtyRules,
+  users, orders, orderItems, products, routes, workUnits, exceptions, auditLogs, sessions, sections, sectionGroups, manualQtyRules, db2Mappings, cacheOrcamentos,
   type User, type InsertUser, type Order, type InsertOrder, type OrderItem, type InsertOrderItem,
   type Product, type InsertProduct, type Route, type InsertRoute, type WorkUnit, type InsertWorkUnit,
   type Exception, type InsertException, type AuditLog, type InsertAuditLog, type Session,
   type SectionGroup, type InsertSectionGroup, type Section, pickingSessions, type PickingSession, type InsertPickingSession,
   type ManualQtyRule, type InsertManualQtyRule,
+  type Db2Mapping, type MappingField,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 
@@ -101,6 +102,13 @@ export interface IStorage {
   updateManualQtyRule(id: string, data: Partial<InsertManualQtyRule>): Promise<ManualQtyRule | undefined>;
   deleteManualQtyRule(id: string): Promise<void>;
   checkProductManualQty(product: Product): Promise<boolean>;
+
+  // DB2 Mappings
+  getMappingByDataset(dataset: string): Promise<Db2Mapping | undefined>;
+  getAllMappings(): Promise<Db2Mapping[]>;
+  saveMapping(dataset: string, mappingJson: MappingField[], description: string | null, createdBy: string): Promise<Db2Mapping>;
+  activateMapping(id: string): Promise<Db2Mapping | undefined>;
+  getCacheOrcamentosPreview(limit: number): Promise<any[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -919,6 +927,62 @@ export class DatabaseStorage implements IStorage {
       }
     }
     return false;
+  }
+
+  // DB2 Mappings
+  async getMappingByDataset(dataset: string): Promise<Db2Mapping | undefined> {
+    const [mapping] = await db.select().from(db2Mappings)
+      .where(and(eq(db2Mappings.dataset, dataset), eq(db2Mappings.isActive, true)))
+      .orderBy(desc(db2Mappings.version))
+      .limit(1);
+    return mapping;
+  }
+
+  async getAllMappings(): Promise<Db2Mapping[]> {
+    return db.select().from(db2Mappings).orderBy(db2Mappings.dataset, desc(db2Mappings.version));
+  }
+
+  async saveMapping(dataset: string, mappingJson: MappingField[], description: string | null, createdBy: string): Promise<Db2Mapping> {
+    const existing = await db.select().from(db2Mappings)
+      .where(eq(db2Mappings.dataset, dataset))
+      .orderBy(desc(db2Mappings.version))
+      .limit(1);
+
+    const nextVersion = existing.length > 0 ? (existing[0].version + 1) : 1;
+
+    const [mapping] = await db.insert(db2Mappings).values({
+      dataset,
+      version: nextVersion,
+      isActive: false,
+      mappingJson: mappingJson as any,
+      description,
+      createdBy,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).returning();
+
+    return mapping;
+  }
+
+  async activateMapping(id: string): Promise<Db2Mapping | undefined> {
+    const [mapping] = await db.select().from(db2Mappings).where(eq(db2Mappings.id, id));
+    if (!mapping) return undefined;
+
+    await db.update(db2Mappings)
+      .set({ isActive: false })
+      .where(eq(db2Mappings.dataset, mapping.dataset));
+
+    const [activated] = await db.update(db2Mappings)
+      .set({ isActive: true, updatedAt: new Date().toISOString() })
+      .where(eq(db2Mappings.id, id))
+      .returning();
+
+    return activated;
+  }
+
+  async getCacheOrcamentosPreview(limit: number): Promise<any[]> {
+    const rows = await db.select().from(cacheOrcamentos).limit(limit);
+    return rows;
   }
 }
 

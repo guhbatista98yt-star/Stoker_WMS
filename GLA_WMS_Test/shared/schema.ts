@@ -258,6 +258,41 @@ export type ManualQtyRule = typeof manualQtyRules.$inferSelect;
 export type InsertManualQtyRule = z.infer<typeof insertManualQtyRuleSchema>;
 
 
+export const db2Mappings = pgTable("db2_mappings", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  dataset: text("dataset").notNull(),
+  version: integer("version").notNull().default(1),
+  isActive: boolean("is_active").notNull().default(false),
+  mappingJson: jsonb("mapping_json").$type<MappingField[]>().notNull(),
+  description: text("description"),
+  createdBy: text("created_by").references(() => users.id),
+  createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
+  updatedAt: timestamp("updated_at").notNull().default(new Date().toISOString()),
+});
+
+export interface MappingField {
+  appField: string;
+  type: "string" | "number" | "date" | "boolean";
+  required: boolean;
+  dbExpression: string;
+  cast?: string;
+  defaultValue?: string;
+}
+
+export interface DataContractField {
+  appField: string;
+  type: "string" | "number" | "date" | "boolean";
+  required: boolean;
+  description: string;
+  example: string;
+}
+
+export const datasetEnum = ["orders", "products", "order_items", "work_units"] as const;
+export type DatasetName = typeof datasetEnum[number];
+
+export type Db2Mapping = typeof db2Mappings.$inferSelect;
+export type InsertDb2Mapping = typeof db2Mappings.$inferInsert;
+
 export const loginSchema = z.object({
   username: z.string().min(1, "Usuário é obrigatório"),
   password: z.string().min(1, "Senha é obrigatória"),
