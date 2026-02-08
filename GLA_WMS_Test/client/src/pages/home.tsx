@@ -13,7 +13,33 @@ import {
 export default function HomePage() {
   const { user, logout } = useAuth();
 
-  const roleModules = {
+  const roleModules: Record<string, { icon: any; title: string; description: string; href: string }[]> = {
+    administrador: [
+      {
+        icon: Settings,
+        title: "Painel Supervisor",
+        description: "Gerenciar pedidos e operações",
+        href: "/supervisor",
+      },
+      {
+        icon: Package,
+        title: "Separação",
+        description: "Separar pedidos de entrega",
+        href: "/separacao",
+      },
+      {
+        icon: ClipboardCheck,
+        title: "Conferência",
+        description: "Conferir pedidos separados",
+        href: "/conferencia",
+      },
+      {
+        icon: Store,
+        title: "Balcão",
+        description: "Atendimento ao cliente",
+        href: "/balcao",
+      },
+    ],
     supervisor: [
       {
         icon: Settings,

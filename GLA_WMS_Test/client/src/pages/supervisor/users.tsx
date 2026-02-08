@@ -57,7 +57,7 @@ const createUserSchema = z.object({
   username: z.string().min(3, "Mínimo 3 caracteres"),
   password: z.string().min(4, "Mínimo 4 caracteres"),
   name: z.string().min(2, "Nome obrigatório"),
-  role: z.enum(["supervisor", "separacao", "conferencia", "balcao"]),
+  role: z.enum(["administrador", "supervisor", "separacao", "conferencia", "balcao"]),
   sections: z.array(z.string()).optional(),
   settings: settingsSchema.optional(),
   active: z.boolean().default(true),
@@ -74,6 +74,7 @@ type CreateUserInput = z.infer<typeof createUserSchema>;
 type UpdateUserInput = z.infer<typeof updateUserSchema>;
 
 const roleLabels: Record<string, { label: string; color: string }> = {
+  administrador: { label: "Administrador", color: "bg-red-100 text-red-700" },
   supervisor: { label: "Supervisor", color: "bg-purple-100 text-purple-700" },
   separacao: { label: "Separação", color: "bg-blue-100 text-blue-700" },
   conferencia: { label: "Conferência", color: "bg-teal-100 text-teal-700" },
@@ -411,6 +412,7 @@ export default function UsersPage() {
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
+                        <SelectItem value="administrador">Administrador</SelectItem>
                         <SelectItem value="supervisor">Supervisor</SelectItem>
                         <SelectItem value="separacao">Separação</SelectItem>
                         <SelectItem value="conferencia">Conferência</SelectItem>
@@ -599,6 +601,7 @@ export default function UsersPage() {
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
+                        <SelectItem value="administrador">Administrador</SelectItem>
                         <SelectItem value="supervisor">Supervisor</SelectItem>
                         <SelectItem value="separacao">Separação</SelectItem>
                         <SelectItem value="conferencia">Conferência</SelectItem>
