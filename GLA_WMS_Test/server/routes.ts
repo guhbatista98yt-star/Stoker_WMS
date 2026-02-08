@@ -206,7 +206,6 @@ export async function registerRoutes(
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "lax",
-        maxAge: 24 * 60 * 60 * 1000,
       });
 
       await storage.createAuditLog({
@@ -245,9 +244,9 @@ export async function registerRoutes(
             ipAddress: getClientIp(req),
             userAgent: getUserAgent(req),
           });
-          // Attach user to request for logging middleware
           (req as any).user = result.user;
         }
+        await storage.deleteSession(token);
       } catch { }
     }
     res.clearCookie("authToken");

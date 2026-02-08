@@ -32,7 +32,7 @@ export default function LoginPage() {
       if (success) {
         toast({
           title: "Login realizado",
-          description: "Bem-vindo ao GLA Stock!",
+          description: "Bem-vindo ao Stokar!",
         });
         navigate("/");
       } else {
@@ -54,14 +54,14 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-[hsl(215,35%,18%)] via-[hsl(220,40%,28%)] to-[hsl(225,45%,35%)] p-4">
+    <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-[hsl(213,67%,22%)] via-[hsl(207,62%,35%)] to-[hsl(157,50%,28%)] p-4">
       <div className="w-full max-w-md">
         <div className="flex flex-col items-center mb-8">
           <div className="w-20 h-20 rounded-2xl bg-white/10 backdrop-blur-sm flex items-center justify-center mb-4 shadow-xl">
             <Warehouse className="h-10 w-10 text-primary" />
           </div>
-          <h1 className="text-3xl font-bold text-white tracking-tight">GLA Stock</h1>
-          <p className="text-white/70 mt-1">Warehouse Management System</p>
+          <h1 className="text-3xl font-bold text-white tracking-tight">Stokar</h1>
+          <p className="text-white/70 mt-1 text-sm italic">Warehouse Management System</p>
         </div>
 
         <Card className="shadow-2xl border-0 bg-white/95 backdrop-blur-sm">
@@ -139,7 +139,7 @@ export default function LoginPage() {
         </Card>
 
         <p className="text-center text-white/50 text-sm mt-6">
-          GLA Stock v1.0 — WMS
+          Stokar v1.0 — por Gusttavo Batista
         </p>
       </div>
     </div>

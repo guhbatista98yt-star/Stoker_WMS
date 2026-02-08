@@ -3,7 +3,7 @@ import { storage } from "./storage";
 import bcrypt from "bcrypt";
 import { randomUUID } from "crypto";
 
-const TOKEN_EXPIRY_HOURS = 24;
+const TOKEN_EXPIRY_HOURS = 12;
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 10);
