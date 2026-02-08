@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth, useSessionQueryKey } from "@/lib/auth";
 import { GradientHeader } from "@/components/ui/gradient-header";
@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
 import {
   ClipboardCheck,
   LogOut,
@@ -22,7 +23,6 @@ import {
 } from "lucide-react";
 import type { WorkUnitWithDetails, OrderItem, Product } from "@shared/schema";
 import { useSSE } from "@/hooks/use-sse";
-import { useCallback } from "react";
 
 type ConferenciaStep = "select" | "scan_pallet" | "checking" | "complete";
 
@@ -43,10 +43,18 @@ export default function ConferenciaPage() {
   const [resultDialogConfig, setResultDialogConfig] = useState({
     type: "success" as "success" | "error" | "warning",
     title: "",
+    message: "",
   });
 
-
-  /* ... inside component ... */
+  useEffect(() => {
+    if (scanStatus !== "idle") {
+      const timer = setTimeout(() => {
+        setScanStatus("idle");
+        setScanMessage("");
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [scanStatus]);
 
   const workUnitsQueryKey = useSessionQueryKey(["/api/work-units", "conferencia"]);
 
@@ -104,7 +112,7 @@ export default function ConferenciaPage() {
     }
   };
 
-  const handleScanPallet = async (qrCode: string) => {
+  const handleScanPallet = useCallback(async (qrCode: string) => {
     if (!selectedWorkUnit) return;
 
     try {
@@ -124,9 +132,9 @@ export default function ConferenciaPage() {
       setScanStatus("error");
       setScanMessage("QR Code inválido");
     }
-  };
+  }, [selectedWorkUnit, scanPalletMutation]);
 
-  const handleScanItem = async (barcode: string) => {
+  const handleScanItem = useCallback(async (barcode: string) => {
     if (!selectedWorkUnit) return;
 
     try {
@@ -166,7 +174,17 @@ export default function ConferenciaPage() {
       setScanStatus("error");
       setScanMessage("Erro ao processar leitura");
     }
-  };
+  }, [selectedWorkUnit, scanItemMutation]);
+
+  const globalScanHandler = useCallback((barcode: string) => {
+    if (step === "checking") {
+      handleScanItem(barcode);
+    } else if (step === "scan_pallet") {
+      handleScanPallet(barcode);
+    }
+  }, [step, handleScanItem, handleScanPallet]);
+
+  useBarcodeScanner(globalScanHandler, step === "checking" || step === "scan_pallet");
 
   const getProgress = () => {
     if (!selectedWorkUnit?.items) return 0;

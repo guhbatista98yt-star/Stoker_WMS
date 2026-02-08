@@ -12,6 +12,7 @@ import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { useSSE } from "@/hooks/use-sse";
+import { useBarcodeScanner } from "@/hooks/use-barcode-scanner";
 import {
   Package,
   List,
@@ -36,7 +37,7 @@ import { ExceptionDialog } from "@/components/orders/exception-dialog";
 import { getCurrentWeekRange } from "@/lib/date-utils";
 import { format } from "date-fns";
 
-type SeparacaoStep = "select" | "picking";
+type SeparacaoStep = "select" | "scan_cart" | "picking";
 type PickingTab = "product" | "list";
 
 const STORAGE_KEY = "wms:separacao-session";
@@ -100,6 +101,16 @@ export default function SeparacaoPage() {
     title: "",
     message: "",
   });
+
+  useEffect(() => {
+    if (scanStatus !== "idle") {
+      const timer = setTimeout(() => {
+        setScanStatus("idle");
+        setScanMessage("");
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [scanStatus]);
 
   const [showExceptionDialog, setShowExceptionDialog] = useState(false);
   const [exceptionItem, setExceptionItem] = useState<ItemWithProduct | null>(null);
@@ -278,6 +289,16 @@ export default function SeparacaoPage() {
     },
   });
 
+  const scanCartMutation = useMutation({
+    mutationFn: async ({ workUnitId, qrCode }: { workUnitId: string; qrCode: string }) => {
+      const res = await apiRequest("POST", `/api/work-units/${workUnitId}/scan-cart`, { qrCode });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+    },
+  });
+
   const unlockMutation = useMutation({
     mutationFn: async (data: string[] | { ids: string[], reset: boolean }) => {
       const body = Array.isArray(data)
@@ -423,15 +444,38 @@ export default function SeparacaoPage() {
     }
     try {
       await lockMutation.mutateAsync(selectedWorkUnits);
-      setStep("picking");
-      setPickingTab("product");
-      setCurrentProductIndex(0);
+      setStep("scan_cart");
+      setScanStatus("idle");
+      setScanMessage("");
     } catch {
       toast({ title: "Erro", description: "Falha ao bloquear unidades de trabalho", variant: "destructive" });
     }
   };
 
-  const handleScanItem = async (barcode: string) => {
+  const handleScanCart = async (qrCode: string) => {
+    const units = allMyUnits.length > 0 ? allMyUnits : selectedWorkUnits.map(id => workUnits?.find(wu => wu.id === id)).filter(Boolean) as WorkUnitWithDetails[];
+    if (units.length === 0) return;
+
+    try {
+      for (const wu of units) {
+        await scanCartMutation.mutateAsync({ workUnitId: wu.id, qrCode });
+      }
+      setScanStatus("success");
+      setScanMessage("Cesto/carrinho registrado!");
+      setTimeout(() => {
+        setStep("picking");
+        setPickingTab("product");
+        setCurrentProductIndex(0);
+        setScanStatus("idle");
+        setScanMessage("");
+      }, 800);
+    } catch {
+      setScanStatus("error");
+      setScanMessage("Erro ao registrar cesto/carrinho");
+    }
+  };
+
+  const handleScanItem = useCallback(async (barcode: string) => {
     const units = allMyUnits;
     if (units.length === 0) return;
 
@@ -490,7 +534,17 @@ export default function SeparacaoPage() {
       setScanStatus("error");
       setScanMessage("Erro ao processar leitura");
     }
-  };
+  }, [allMyUnits, scanItemMutation, filteredAggregatedProducts]);
+
+  const globalScanHandler = useCallback((barcode: string) => {
+    if (step === "picking") {
+      handleScanItem(barcode);
+    } else if (step === "scan_cart") {
+      handleScanCart(barcode);
+    }
+  }, [step, handleScanItem]);
+
+  useBarcodeScanner(globalScanHandler, step === "picking" || step === "scan_cart");
 
   const handleIncrementProduct = async (ap: AggregatedProduct, qty: number = 1) => {
     const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
@@ -711,6 +765,45 @@ export default function SeparacaoPage() {
               <p className="text-xs">Aguarde novos pedidos</p>
             </div>
           )}
+        </div>
+      )}
+
+      {step === "scan_cart" && (
+        <div className="flex-1 flex items-center justify-center px-4">
+          <div className="w-full max-w-md space-y-6 text-center">
+            <div className="space-y-2">
+              <div className="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
+                <Package className="h-10 w-10 text-primary" />
+              </div>
+              <h2 className="text-lg font-semibold">Leia o Cesto/Carrinho</h2>
+              <p className="text-sm text-muted-foreground">
+                Escaneie o código do cesto ou carrinho onde os produtos separados serão colocados
+              </p>
+            </div>
+            <ScanInput
+              placeholder="Leia o código do cesto/carrinho..."
+              onScan={handleScanCart}
+              status={scanStatus}
+              statusMessage={scanMessage}
+              autoFocus
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const ids = allMyUnits.map(wu => wu.id);
+                if (ids.length > 0) {
+                  unlockMutation.mutate({ ids, reset: true });
+                } else {
+                  setStep("select");
+                  setSelectedWorkUnits([]);
+                }
+              }}
+              className="text-xs"
+            >
+              Cancelar
+            </Button>
+          </div>
         </div>
       )}
 

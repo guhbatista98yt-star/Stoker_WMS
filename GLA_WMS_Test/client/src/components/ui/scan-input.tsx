@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { ScanLine, Check, X, AlertTriangle } from "lucide-react";
@@ -33,13 +33,13 @@ export function ScanInput({
   const [internalValue, setInternalValue] = useState("");
 
   const value = controlledValue !== undefined ? controlledValue : internalValue;
-  const setValue = (newValue: string) => {
+  const setValue = useCallback((newValue: string) => {
     if (controlledOnChange) {
       controlledOnChange(newValue);
     } else {
       setInternalValue(newValue);
     }
-  };
+  }, [controlledOnChange]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -48,21 +48,12 @@ export function ScanInput({
     }
   }, [autoFocus, disabled]);
 
-  useEffect(() => {
-    if (status !== "idle") {
-      const timer = setTimeout(() => {
-        setValue("");
-        if (inputRef.current && !disabled) {
-          inputRef.current.focus();
-        }
-      }, 1500);
-      return () => clearTimeout(timer);
-    }
-  }, [status, disabled]);
-
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter" && value.trim()) {
-      onScan(value.trim());
+      e.preventDefault();
+      const scannedValue = value.trim();
+      setValue("");
+      onScan(scannedValue);
     }
   };
 
