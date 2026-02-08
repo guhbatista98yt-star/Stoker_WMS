@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { useToast } from "@/hooks/use-toast";
-import { Warehouse, User, Lock, Loader2 } from "lucide-react";
+import { User, Lock, Loader2 } from "lucide-react";
 
 export default function LoginPage() {
   const [, navigate] = useLocation();
@@ -57,10 +57,7 @@ export default function LoginPage() {
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-[hsl(213,67%,22%)] via-[hsl(207,62%,35%)] to-[hsl(157,50%,28%)] p-4">
       <div className="w-full max-w-md">
         <div className="flex flex-col items-center mb-8">
-          <div className="w-20 h-20 rounded-2xl bg-white/10 backdrop-blur-sm flex items-center justify-center mb-4 shadow-xl">
-            <Warehouse className="h-10 w-10 text-primary" />
-          </div>
-          <h1 className="text-3xl font-bold text-white tracking-tight">Stokar</h1>
+          <img src="/stokar-logo.png" alt="Stokar" className="h-20 mb-2 drop-shadow-xl rounded-2xl" style={{ mixBlendMode: "screen" }} />
           <p className="text-white/70 mt-1 text-sm italic">Warehouse Management System</p>
         </div>
 
