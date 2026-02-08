@@ -93,6 +93,7 @@ export const cacheOrcamentos = pgTable("cache_orcamentos", {
 export const products = pgTable("products", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   erpCode: text("erp_code").notNull(),
+  referenceCode: text("reference_code"),
   barcode: text("barcode"),
   boxBarcode: text("box_barcode"),
   name: text("name").notNull(),

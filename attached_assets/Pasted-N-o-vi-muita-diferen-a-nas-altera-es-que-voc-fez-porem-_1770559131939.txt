@@ -1,0 +1,26 @@
+Não vi muita diferença nas alterações que você fez, porem aqui está um esboço de como deveria ficar a parte de separação. 
+E quando a separação for concluida, é para voltara para tela inicial dos pedidos, e não para a tela de carrinho.
+
+A funcionalidade do periodo, tem que ser igual em todos os modulos, por exemplo, no modulo pedido é selecionado o periodo e busca somente quando clica em buscar. Quero da mesma forma em todos os outros modulos.
+No modulo de pedidos no supervisor: 
+preciso corrigir os filtros, ele serão somente: Busca por pedido, Periodo, Status Financeiro, Status separação/conferencia, Rota, Prioridade, Lançado.
+Preciso que na aba dos pedidos do supervisor atualize as informações instantaneamente, se algum operador iniciar a separação(Em separação, separado, Em conferencia, Conferido, pendente de conferencia se caso já tiver separado.)
+Elimine a aba Código de separação, não será necessario, até porque varios operadores irão separar o mesmo pedido, só que por seções diferentes, então gerar codigo de separação será um problema.
+
+No modulo separação: 
+Para os operadores, o header atrapalha a visualização de pedidos e outros dados no coletor, preciso que refaça o layout UI/UX para fica apropriado e que facilite o fluxo, agilidade da operação.
+Os pedidos listados, quero que apresente somente as seguintes informações: Nª Pedido, Cliente, Quantidade de produtos a separar (Somente a quantidade dos produtos da seção definida para o operador), data e hora do lançamento.
+Ao abrir a aba separar, irá mostra o primeiro produto da lista de conferencia com informações bem explanadas, e essa aba terá um icone de cubo ou caixa, que nela preciso que apresente as seguintes informações: N° dos pedidos, Codigo produto, Referencia (busque da coluna CODIGOINTERNOFORN), Codigo de barras, Codigo de caixa, Descrição de produto, Quantidade a separar, campo de quantidade com o simbolo + e - (no caso para subtrair ou aumentar as quantidade, porem esse campo e botões ficará inativo, para obrigar o operador a bipar a mercadoria) N° e descrição da seção do produto, icone de excessão(Caso seja necessario informar uma exceção de falta ou avaria), Botão de salvar, Botão de pular(Caso bipe a quantidade total do produto, ele pula automaticamente).
+Na mesma aba separar, terá uma sub-aba, com o icone de uma lista, que será para o operador visualizar todos os produtos do pedido que está sendo separado, e em cada linha de produto irá apresentar as seguintes informações: Código do produto, descrição do produto, código de barras, quantidade a separar/separada, código dos pedidos que contem o produto, Icone de excessão (Lembrando que se for informado excessão em qualquer outra aba, é para instantaneamente aparecer nessa tambem).
+Os produtos conferidos total ficará com um icone de confirmado verde.
+O operador poderá selecionar varios pedidos de uma vez só para iniciar a separação.
+Se o operador tiver relação com multiplas seções, preciso que na aba de icone com lista, onde fica os produtos, tenha um filtro para caso o separador queira visualizar somente os produtos da seção desejada.
+Se ele selecionar um produto na aba de icone com lista, ele vai diretamente para a aba separar, para bipar a separação do produto.
+Toda vez que o operador bipar um produto, independente da aba que ele esteja (Lista ou Separar), ele seja direcionado sempre para a aba separar, pois ali irá conter todas as informações do produto.
+Se o produto não tiver codigo de caixa, informe "Indisponivel".
+Lembre-se Preciso que faça backup da ultima alteração do operador, se caso a internet, sistema ou navegador fechar ou cair, para quando ele acessar novamente, volte para a aba e o produto que ele estaria conferindo.
+Apos o operador salvar a separação, preciso que volte imediatamente para tela inicial, e instantaneamente o supervisor já consiga ver os status do pedido atualizado.
+
+
+
+Algumas alterações ja foram feitas, mas verifiquei que o periodo no modulo de separação não está com a opção buscar.
