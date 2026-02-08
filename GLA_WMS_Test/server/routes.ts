@@ -711,12 +711,22 @@ export async function registerRoutes(
       const { workUnitIds, reset } = req.body;
       const userId = (req as any).user.id;
 
+      const affectedOrderIds = new Set<string>();
+      for (const wuId of workUnitIds) {
+        const wu = await storage.getWorkUnitById(wuId);
+        if (wu?.orderId) affectedOrderIds.add(wu.orderId);
+      }
+
       await storage.unlockWorkUnits(workUnitIds);
 
       if (reset) {
         for (const id of workUnitIds) {
           await storage.resetWorkUnitProgress(id);
         }
+      }
+
+      for (const orderId of affectedOrderIds) {
+        await storage.recalculateOrderStatus(orderId);
       }
 
       await storage.createAuditLog({
@@ -727,6 +737,8 @@ export async function registerRoutes(
         ipAddress: getClientIp(req),
         userAgent: getUserAgent(req),
       });
+
+      broadcastSSE("work_units_unlocked", { workUnitIds, affectedOrderIds: [...affectedOrderIds] });
 
       res.json({ success: true });
     } catch (error) {
