@@ -775,6 +775,8 @@ export async function registerRoutes(
         }
       }
 
+      broadcastSSE("picking_started", { workUnitId: req.params.id, orderId: workUnit.orderId, userId: (req as any).user.id });
+
       const updated = await storage.getWorkUnitById(req.params.id as string);
 
       res.json({ workUnit: updated });
@@ -793,7 +795,17 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Unidade não encontrada" });
       }
 
-      await storage.updateWorkUnit(req.params.id as string, { palletQrCode: qrCode });
+      await storage.updateWorkUnit(req.params.id as string, { palletQrCode: qrCode, status: "em_andamento", startedAt: new Date().toISOString() });
+
+      if (workUnit.orderId) {
+        const order = await storage.getOrderById(workUnit.orderId);
+        if (order && order.status === "separado") {
+          await storage.updateOrder(workUnit.orderId, { status: "em_conferencia", updatedAt: new Date().toISOString() });
+        }
+      }
+
+      broadcastSSE("conference_started", { workUnitId: req.params.id, orderId: workUnit.orderId, userId: (req as any).user.id });
+
       const updated = await storage.getWorkUnitById(req.params.id as string);
 
       res.json({ workUnit: updated });
@@ -876,11 +888,13 @@ export async function registerRoutes(
 
       const updated = await storage.getWorkUnitById(req.params.id as string);
 
-      // Check if all items are complete (accounting for exceptions)
+      broadcastSSE("item_picked", { workUnitId: req.params.id, orderId: workUnit.orderId, productId: product.id, userId: (req as any).user.id });
+
       const isComplete = await storage.checkAndCompleteWorkUnit(req.params.id as string);
 
       if (isComplete) {
         await storage.updateOrder(workUnit.orderId, { status: "separado" });
+        broadcastSSE("picking_finished", { workUnitId: req.params.id, orderId: workUnit.orderId });
       }
 
       const finalWorkUnit = await storage.getWorkUnitById(req.params.id as string);
@@ -935,6 +949,7 @@ export async function registerRoutes(
       if (allComplete) {
         await storage.updateWorkUnit(req.params.id as string, { status: "concluido", completedAt: new Date().toISOString() });
         await storage.updateOrder(workUnit.orderId, { status: "conferido" });
+        broadcastSSE("conference_finished", { workUnitId: req.params.id, orderId: workUnit.orderId });
       }
 
       const finalWorkUnit = await storage.getWorkUnitById(req.params.id as string);
@@ -1084,6 +1099,8 @@ export async function registerRoutes(
 
       // Check if work unit is now complete
       await storage.checkAndCompleteWorkUnit(workUnitId);
+
+      broadcastSSE("exception_created", { workUnitId, orderItemId, type, quantity, exceptionId: exception.id });
 
       await storage.createAuditLog({
         userId: (req as any).user.id,
