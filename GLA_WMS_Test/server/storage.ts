@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, and, sql, desc, inArray, isNull, gt, lt } from "drizzle-orm";
+import { eq, and, sql, desc, inArray, isNull, gt, lt, or } from "drizzle-orm";
 import {
   users, orders, orderItems, products, routes, workUnits, exceptions, auditLogs, sessions, sections, sectionGroups, manualQtyRules, db2Mappings, cacheOrcamentos,
   type User, type InsertUser, type Order, type InsertOrder, type OrderItem, type InsertOrderItem,
@@ -72,12 +72,15 @@ export interface IStorage {
   unlockWorkUnits(workUnitIds: string[]): Promise<void>;
 
   // Exceptions
-  getAllExceptions(): Promise<(Exception & { orderItem: OrderItem & { product: Product }; reportedByUser: User; workUnit: WorkUnit })[]>;
+  getAllExceptions(): Promise<(Exception & { orderItem: OrderItem & { product: Product; order: Order }; reportedByUser: User; workUnit: WorkUnit })[]>;
+
   createException(exception: InsertException): Promise<Exception>;
   deleteExceptionsForItem(orderItemId: string): Promise<void>;
+  authorizeExceptions(exceptionIds: string[], authData: { authorizedBy: string; authorizedByName: string; authorizedAt: string }): Promise<void>;
 
   // Audit Logs
   createAuditLog(log: InsertAuditLog): Promise<AuditLog>;
+  getAllAuditLogs(): Promise<(AuditLog & { user: User | null })[]>;
 
   // Stats
   getOrderStats(): Promise<{ pendentes: number; emSeparacao: number; separados: number; conferidos: number; excecoes: number }>;
@@ -95,6 +98,7 @@ export interface IStorage {
   updatePickingSessionHeartbeat(id: string): Promise<void>;
   deletePickingSession(orderId: string, sectionId: string): Promise<void>;
   getPickingSessionsByOrder(orderId: string): Promise<PickingSession[]>;
+  cancelOrderLaunch(orderId: string): Promise<void>;
 
   // Manual Quantity Rules
   getAllManualQtyRules(): Promise<ManualQtyRule[]>;
@@ -133,12 +137,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateUser(id: string, userUpdate: Partial<User>): Promise<User | undefined> {
-    const [updatedUser] = await db
+    // console.log(`[STORAGE] updateUser: Updating user ${id}`, JSON.stringify(userUpdate));
+    await db
       .update(users)
       .set(userUpdate)
-      .where(eq(users.id, id))
-      .returning();
-    return updatedUser;
+      .where(eq(users.id, id));
+
+    // Fetch the updated user to return it (workaround for potential returning() issues or just safety)
+    return this.getUser(id);
   }
 
 
@@ -215,7 +221,9 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getProductByBarcode(barcode: string): Promise<Product | undefined> {
-    const [product] = await db.select().from(products).where(eq(products.barcode, barcode));
+    const [product] = await db.select().from(products).where(
+      or(eq(products.barcode, barcode), eq(products.boxBarcode, barcode))
+    );
     return product;
   }
 
@@ -256,6 +264,7 @@ export class DatabaseStorage implements IStorage {
         ...o,
         hasExceptions: ordersWithExceptions.has(o.id),
         totalItems: stats.total,
+        itemCount: stats.total,
         pickedItems: stats.picked
       };
     });
@@ -312,14 +321,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async checkAndUpdateOrderStatus(orderId: string): Promise<WorkUnit | null> {
-    const items = await this.getOrderItemsByOrderId(orderId);
-
-    // Check if all items are fully picked (qtyPicked >= quantity)
-    // Note: status might be 'separado' on item level.
-    const allPicked = items.every(i => Number(i.qtyPicked) >= Number(i.quantity));
+    // Agora validamos se TODAS as unidades de trabalho de separa\u00e7\u00e3o est\u00e3o conclu\u00eddas
+    const allWusComplete = await this.checkAllWorkUnitsComplete(orderId);
     let createdWorkUnit: WorkUnit | null = null;
 
-    if (allPicked) {
+    if (allWusComplete) {
       await db.update(orders)
         .set({
           status: "separado",
@@ -327,8 +333,7 @@ export class DatabaseStorage implements IStorage {
         })
         .where(eq(orders.id, orderId));
 
-      // Create Conference WorkUnit
-      // Check if exists first
+      // Criar Unidade de Confer\u00eancia se n\u00e3o existir
       const existing = await db.select().from(workUnits)
         .where(and(
           eq(workUnits.orderId, orderId),
@@ -351,7 +356,8 @@ export class DatabaseStorage implements IStorage {
   async recalculateOrderStatus(orderId: string): Promise<void> {
     const order = await this.getOrderById(orderId);
     if (!order || !order.isLaunched) return;
-    if (["separado", "conferido", "em_conferencia", "finalizado"].includes(order.status)) return;
+    // Removido bloqueio restritivo para permitir revers\u00e3o de 'separado' se itens forem resetados
+    if (["conferido", "em_conferencia", "finalizado"].includes(order.status)) return;
 
     const items = await this.getOrderItemsByOrderId(orderId);
     const allItemsPicked = items.length > 0 && items.every(i => Number(i.separatedQty) >= Number(i.quantity));
@@ -456,7 +462,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Work Units
-  // Work Units
+  // Retorna unidades de trabalho, opcionalmente filtradas por tipo.
+  // IMPORTANTE: Para 'conferencia', filtra pedidos que ainda n\u00e3o est\u00e3o 'separado' ou adiante.
   async getWorkUnits(type?: string): Promise<(WorkUnit & { order: Order; items: (OrderItem & { product: Product; exceptionQty?: number })[]; lockedByName?: string })[]> {
     const query = type
       ? db.select().from(workUnits).where(eq(workUnits.type, type as any))
@@ -511,7 +518,9 @@ export class DatabaseStorage implements IStorage {
       if (!product) continue;
 
       const exceptionQty = exceptionsMap.get(item.id) || 0;
-      const fullItem = { ...item, product, exceptionQty };
+      // Injetar o array de exce\u00e7\u00f5es para o frontend
+      const itemExceptions = exceptionsData.filter(e => e.orderItemId === item.id);
+      const fullItem = { ...item, product, exceptionQty, exceptions: itemExceptions };
 
       const list = itemsByOrder.get(item.orderId) || [];
       list.push(fullItem);
@@ -524,6 +533,14 @@ export class DatabaseStorage implements IStorage {
     for (const wu of wus) {
       const order = ordersMap.get(wu.orderId);
       if (order) {
+        // Filtro espec\u00edfico para Confer\u00eancia: S\u00f3 ver pedidos Separados ou j\u00e1 em Confer\u00eancia/Conferidos
+        if (type === "conferencia") {
+          const allowedStatuses = ["separado", "em_conferencia", "conferido"];
+          if (!allowedStatuses.includes(order.status)) {
+            continue;
+          }
+        }
+
         const allItems = itemsByOrder.get(wu.orderId) || [];
         const filteredItems = wu.section
           ? allItems.filter(i => i.section === wu.section && i.pickupPoint === wu.pickupPoint)
@@ -652,11 +669,11 @@ export class DatabaseStorage implements IStorage {
       const itemExcs = unitExceptions.filter(e => e.orderItemId === item.id);
       const excQty = itemExcs.reduce((sum, e) => sum + Number(e.quantity), 0);
       const isItemDone = Number(item.separatedQty) + excQty >= Number(item.quantity);
-      console.log(`Debug WU ${id}: Item ${item.id} status - Sep: ${item.separatedQty}, Exc: ${excQty}, Target: ${item.quantity}. Done: ${isItemDone}`);
+      // console.log(`Debug WU ${id}: Item ${item.id} status - Sep: ${item.separatedQty}, Exc: ${excQty}, Target: ${item.quantity}. Done: ${isItemDone}`);
       return isItemDone;
     });
 
-    console.log(`Debug WU ${id}: All Complete ? ${allComplete} `);
+    // console.log(`Debug WU ${id}: All Complete ? ${allComplete} `);
 
     if (allComplete) {
       await db.update(workUnits)
@@ -665,6 +682,71 @@ export class DatabaseStorage implements IStorage {
       return true;
     }
     return false;
+  }
+
+  async checkAllWorkUnitsComplete(orderId: string): Promise<boolean> {
+    // 1. Pegar TODAS as unidades de separa\u00e7\u00e3o existentes
+    const units = await db.select().from(workUnits).where(and(eq(workUnits.orderId, orderId), eq(workUnits.type, "separacao")));
+    if (units.length === 0) return false;
+
+    // Todas as WUs de separa\u00e7\u00e3o devem estar conclu\u00eddas
+    const allWusDone = units.every(u => u.status === "concluido");
+    if (!allWusDone) return false;
+
+    // 2. DOUBLE CHECK: Validar itens do pedido e exce\u00e7\u00f5es
+    // Isso evita que o pedido seja finalizado se existem se\u00e7\u00f5es que sequer tiveram WUs criadas
+    const items = await this.getOrderItemsByOrderId(orderId);
+    if (items.length === 0) return false;
+
+    // Buscar exce\u00e7\u00f5es de separa\u00e7\u00e3o do pedido
+    const orderExceptions = await db.select().from(exceptions)
+      .innerJoin(workUnits, eq(exceptions.workUnitId, workUnits.id))
+      .where(and(eq(workUnits.orderId, orderId), eq(workUnits.type, "separacao")));
+
+    // Validar se CADA item foi separado ou tratado como exce\u00e7\u00e3o
+    // Adicionalmente, verificamos se existe ALGUM item com quantidade > 0 que n\u00e3o tem separa\u00e7\u00e3o nem exce\u00e7\u00e3o.
+    // Se existir, for\u00e7amos FALSE.
+    const anyItemPending = items.some(item => {
+      const itemExcs = orderExceptions.filter(e => e.exceptions.orderItemId === item.id);
+      const excQty = itemExcs.reduce((sum, e) => sum + Number(e.exceptions.quantity), 0);
+      const sep = Number(item.separatedQty);
+      const qty = Number(item.quantity);
+      // Item Pendente se (sep + exc < qty) E (qty > 0)
+      return qty > 0 && (sep + excQty) < qty;
+    });
+
+    if (anyItemPending) return false;
+
+    // Redundante, mas mant\u00e9m a l\u00f3gica original de 'every'
+    const everythingSeparated = items.every(item => {
+      const itemExcs = orderExceptions.filter(e => e.exceptions.orderItemId === item.id);
+      const excQty = itemExcs.reduce((sum, e) => sum + Number(e.exceptions.quantity), 0);
+      const isDone = (Number(item.separatedQty) + excQty) >= Number(item.quantity);
+      return isDone;
+    });
+
+    return everythingSeparated;
+  }
+
+  async checkAllConferenceUnitsComplete(orderId: string): Promise<boolean> {
+    // 1. Pegar TODAS as unidades de confer\u00eancia (paletiza\u00e7\u00e3o/confer\u00eancia)
+    // Assumindo que confer\u00eancia usa type='conferencia' ou que itens verificados marcam o pedido.
+    // O pedido entra em 'em_conferencia'. O target \u00e9 'conferido'.
+
+    // items must be fully checked
+    const items = await this.getOrderItemsByOrderId(orderId);
+    if (items.length === 0) return false;
+
+    const everythingChecked = items.every(item => {
+      // Se o item foi separado (qty > 0), ele precisa ser conferido.
+      // checkedQty >= separatedQty
+      const sep = Number(item.separatedQty);
+      const checked = Number(item.checkedQty);
+      if (sep === 0) return true; // Nada separado, nada a conferir
+      return checked >= sep;
+    });
+
+    return everythingChecked;
   }
 
   async adjustItemQuantityForException(orderItemId: string): Promise<void> {
@@ -701,20 +783,21 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Exceptions
-  async getAllExceptions(): Promise<(Exception & { orderItem: OrderItem & { product: Product }; reportedByUser: User; workUnit: WorkUnit })[]> {
+  async getAllExceptions(): Promise<(Exception & { orderItem: OrderItem & { product: Product; order: Order }; reportedByUser: User; workUnit: WorkUnit })[]> {
     const excs = await db.select().from(exceptions).orderBy(desc(exceptions.createdAt));
-    const result: (Exception & { orderItem: OrderItem & { product: Product }; reportedByUser: User; workUnit: WorkUnit })[] = [];
+    const result: (Exception & { orderItem: OrderItem & { product: Product; order: Order }; reportedByUser: User; workUnit: WorkUnit })[] = [];
 
     for (const exc of excs) {
       const [item] = await db.select().from(orderItems).where(eq(orderItems.id, exc.orderItemId));
       const [product] = item ? await db.select().from(products).where(eq(products.id, item.productId)) : [undefined];
+      const [order] = item ? await db.select().from(orders).where(eq(orders.id, item.orderId)) : [undefined];
       const [user] = await db.select().from(users).where(eq(users.id, exc.reportedBy));
       const [wu] = exc.workUnitId ? await db.select().from(workUnits).where(eq(workUnits.id, exc.workUnitId)) : [undefined];
 
-      if (item && product && user && wu) {
+      if (item && product && order && user && wu) {
         result.push({
           ...exc,
-          orderItem: { ...item, product },
+          orderItem: { ...item, product, order },
           reportedByUser: user,
           workUnit: wu,
         });
@@ -723,6 +806,7 @@ export class DatabaseStorage implements IStorage {
 
     return result;
   }
+
 
   async createException(exception: InsertException): Promise<Exception> {
     const [newExc] = await db.insert(exceptions).values({
@@ -736,10 +820,35 @@ export class DatabaseStorage implements IStorage {
     await db.delete(exceptions).where(eq(exceptions.orderItemId, orderItemId));
   }
 
+  async authorizeExceptions(exceptionIds: string[], authData: { authorizedBy: string; authorizedByName: string; authorizedAt: string }): Promise<void> {
+    await db.update(exceptions)
+      .set({
+        authorizedBy: authData.authorizedBy,
+        authorizedByName: authData.authorizedByName,
+        authorizedAt: authData.authorizedAt,
+      })
+      .where(inArray(exceptions.id, exceptionIds));
+  }
+
   // Audit Logs
   async createAuditLog(log: InsertAuditLog): Promise<AuditLog> {
     const [newLog] = await db.insert(auditLogs).values(log).returning();
     return newLog;
+  }
+
+  async getAllAuditLogs(): Promise<(AuditLog & { user: User | null })[]> {
+    const logs = await db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt));
+    const result: (AuditLog & { user: User | null })[] = [];
+
+    for (const log of logs) {
+      const [user] = log.userId
+        ? await db.select().from(users).where(eq(users.id, log.userId))
+        : [null];
+
+      result.push({ ...log, user });
+    }
+
+    return result;
   }
 
   async getAllSections(): Promise<Section[]> {
@@ -757,13 +866,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createSectionGroup(group: InsertSectionGroup): Promise<SectionGroup> {
-    console.log('Storage: Creating section group:', group);
     try {
       const [newGroup] = await db.insert(sectionGroups).values(group).returning();
-      console.log('Storage: Group created:', newGroup);
       return newGroup;
     } catch (error) {
-      console.error('Storage: Error creating group:', error);
       throw error;
     }
   }
@@ -899,6 +1005,43 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(pickingSessions).where(eq(pickingSessions.orderId, orderId));
   }
 
+  async cancelOrderLaunch(orderId: string): Promise<void> {
+    // Delete all work units for this order
+    await db.delete(workUnits).where(eq(workUnits.orderId, orderId));
+
+    // Delete all picking sessions for this order
+    await db.delete(pickingSessions).where(eq(pickingSessions.orderId, orderId));
+
+    // Get all order items to delete exceptions
+    const items = await db.select({ id: orderItems.id })
+      .from(orderItems)
+      .where(eq(orderItems.orderId, orderId));
+
+    // Delete all exceptions for order items
+    for (const item of items) {
+      await db.delete(exceptions).where(eq(exceptions.orderItemId, item.id));
+    }
+
+    // Reset all order items
+    await db.update(orderItems)
+      .set({
+        status: "pendente",
+        qtyPicked: 0,
+        separatedQty: 0,
+        checkedQty: 0
+      })
+      .where(eq(orderItems.orderId, orderId));
+
+    // Reset order exactly to 'pendente' and not launched
+    await db.update(orders)
+      .set({
+        status: "pendente",
+        isLaunched: false,
+        updatedAt: new Date().toISOString()
+      })
+      .where(eq(orders.id, orderId));
+  }
+
   // Manual Quantity Rules
   async getAllManualQtyRules(): Promise<ManualQtyRule[]> {
     return await db.select().from(manualQtyRules).orderBy(desc(manualQtyRules.createdAt));
@@ -920,7 +1063,7 @@ export class DatabaseStorage implements IStorage {
 
   async checkProductManualQty(product: Product): Promise<boolean> {
     const rules = await db.select().from(manualQtyRules).where(eq(manualQtyRules.active, true));
-    
+
     for (const rule of rules) {
       const values = rule.value.split(";").map(v => v.trim()).filter(v => v.length > 0);
       for (const val of values) {
@@ -992,6 +1135,36 @@ export class DatabaseStorage implements IStorage {
       .returning();
 
     return activated;
+  }
+
+  async checkAndCompleteConference(id: string): Promise<boolean> {
+    const [workUnit] = await db.select().from(workUnits).where(eq(workUnits.id, id));
+    if (!workUnit) return false;
+
+    const items = await db.select().from(orderItems).where(
+      and(
+        eq(orderItems.orderId, workUnit.orderId),
+        eq(orderItems.pickupPoint, workUnit.pickupPoint)
+      )
+    );
+
+    const unitExceptions = await db.select().from(exceptions).where(eq(exceptions.workUnitId, id));
+
+    const allComplete = items.every(item => {
+      const itemExcs = unitExceptions.filter(e => e.orderItemId === item.id);
+      const excQty = itemExcs.reduce((sum, e) => sum + Number(e.quantity), 0);
+      const sep = Number(item.separatedQty) || 0;
+      if (sep === 0) return true;
+      return Number(item.checkedQty) + excQty >= sep;
+    });
+
+    if (allComplete) {
+      await db.update(workUnits)
+        .set({ status: "concluido", completedAt: new Date().toISOString() })
+        .where(eq(workUnits.id, id));
+      return true;
+    }
+    return false;
   }
 
   async getCacheOrcamentosPreview(limit: number): Promise<any[]> {

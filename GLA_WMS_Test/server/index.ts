@@ -1,4 +1,5 @@
 import express, { type Request, Response, NextFunction } from "express";
+import { log } from "./log";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
@@ -23,16 +24,7 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
-export function log(message: string, source = "express") {
-  const formattedTime = new Date().toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true,
-  });
 
-  console.log(`${formattedTime} [${source}] ${message}`);
-}
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -54,18 +46,19 @@ app.use((req, res, next) => {
       if (path === "/api/auth/login" && res.statusCode === 200 && capturedJsonResponse?.user) {
         const username = capturedJsonResponse.user.username || capturedJsonResponse.user.name || "User";
         logLine = `${username} is log in`;
-        log(logLine);
+        // log(logLine);
       } else if (path === "/api/auth/logout" && (req as any).user) {
         const username = (req as any).user.username || (req as any).user.name || "User";
         logLine = `${username} is log out`;
-        log(logLine);
+        // log(logLine);
       } else {
         // Filter out non-critical errors (4xx) and GET/OPTIONS
         // Only log:
         // 1. Critical Errors (>= 500)
         // 2. Successful Mutations (POST, PUT, PATCH, DELETE with status < 400)
         const isCriticalError = res.statusCode >= 500;
-        const isSuccessMutation = ["POST", "PUT", "PATCH", "DELETE"].includes(req.method) && res.statusCode < 400;
+        // Não logar mutations de sucesso (POST/PUT/DELETE com sucesso)
+        const isSuccessMutation = false; // Desabilitado completamente conforme solicitado pelo usuário
 
         if (isCriticalError || isSuccessMutation) {
           if (isCriticalError && capturedJsonResponse) {
@@ -124,7 +117,7 @@ app.use((req, res, next) => {
       host: "0.0.0.0",
     },
     () => {
-      log(`serving on port ${port}`);
+      log(`Servidor iniciado na porta ${port}`);
     },
   );
 })();

@@ -50,7 +50,8 @@ import type { User, Section, UserSettings } from "@shared/schema";
 
 const settingsSchema = z.object({
   allowManualQty: z.boolean().default(false),
-  allowMultiplier: z.boolean().default(false),
+
+  canAuthorizeOwnExceptions: z.boolean().default(false),
 });
 
 const createUserSchema = z.object({
@@ -107,7 +108,7 @@ export default function UsersPage() {
       name: "",
       role: "separacao",
       sections: [],
-      settings: { allowManualQty: false, allowMultiplier: false },
+      settings: { allowManualQty: false, canAuthorizeOwnExceptions: false },
       active: true,
     },
   });
@@ -120,7 +121,7 @@ export default function UsersPage() {
       name: "",
       role: "separacao",
       sections: [],
-      settings: { allowManualQty: false, allowMultiplier: false },
+      settings: { allowManualQty: false, canAuthorizeOwnExceptions: false },
       active: true,
     },
   });
@@ -140,7 +141,8 @@ export default function UsersPage() {
         sections: (editingUser.sections as string[]) || [],
         settings: {
           allowManualQty: userSettings.allowManualQty ?? false,
-          allowMultiplier: userSettings.allowMultiplier ?? false,
+
+          canAuthorizeOwnExceptions: userSettings.canAuthorizeOwnExceptions ?? false,
         },
         active: editingUser.active,
       });
@@ -274,11 +276,14 @@ export default function UsersPage() {
                         <TableCell>
                           {userSections.length > 0 ? (
                             <div className="flex flex-wrap gap-1">
-                              {userSections.slice(0, 3).map((s, i) => (
-                                <Badge key={i} variant="secondary" className="text-xs">
-                                  {s}
-                                </Badge>
-                              ))}
+                              {userSections.slice(0, 3).map((s, i) => {
+                                const secName = availableSections?.find(sec => String(sec.id) === s)?.name || s;
+                                return (
+                                  <Badge key={i} variant="secondary" className="text-xs">
+                                    {secName}
+                                  </Badge>
+                                )
+                              })}
                               {userSections.length > 3 && (
                                 <Badge variant="secondary" className="text-xs">
                                   +{userSections.length - 3}
@@ -303,7 +308,7 @@ export default function UsersPage() {
                         <TableCell>
                           {(() => {
                             const settings = (user.settings as UserSettings) || {};
-                            const hasBadges = settings.allowManualQty || settings.allowMultiplier;
+                            const hasBadges = settings.allowManualQty || settings.allowMultiplier || settings.canAuthorizeOwnExceptions;
                             return hasBadges ? (
                               <div className="flex flex-wrap gap-1">
                                 {settings.allowManualQty && (
@@ -314,6 +319,11 @@ export default function UsersPage() {
                                 {settings.allowMultiplier && (
                                   <Badge variant="outline" className="bg-blue-100 text-blue-700 border-0 text-xs">
                                     Mult
+                                  </Badge>
+                                )}
+                                {settings.canAuthorizeOwnExceptions && (
+                                  <Badge variant="outline" className="bg-green-100 text-green-700 border-0 text-xs">
+                                    Auto-Exc
                                   </Badge>
                                 )}
                               </div>
@@ -441,7 +451,7 @@ export default function UsersPage() {
                         {availableSections && availableSections.length > 0 ? (
                           <div className="grid grid-cols-2 gap-2 border rounded-md p-2 max-h-40 overflow-y-auto">
                             {availableSections.map((section) => {
-                              const sectionValue = section.name;
+                              const sectionValue = String(section.id);
                               return (
                                 <FormField
                                   key={section.id}
@@ -504,15 +514,16 @@ export default function UsersPage() {
                       </FormItem>
                     )}
                   />
+
                   <FormField
-                    control={form.control}
-                    name="settings.allowMultiplier"
+                    control={form.control} // IMPORTANTE: Mude para editForm.control no formulário de edição!
+                    name="settings.canAuthorizeOwnExceptions"
                     render={({ field }) => (
                       <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
                         <div className="space-y-0.5">
-                          <FormLabel>Permitir Multiplicador</FormLabel>
+                          <FormLabel>Auto-autorizar Exceções</FormLabel>
                           <FormDescription>
-                            Permite usar multiplicador de quantidade
+                            Permite autorizar suas próprias exceções
                           </FormDescription>
                         </div>
                         <FormControl>
@@ -657,7 +668,7 @@ export default function UsersPage() {
                         {availableSections && availableSections.length > 0 ? (
                           <div className="grid grid-cols-2 gap-2 border rounded-md p-2 max-h-40 overflow-y-auto">
                             {availableSections.map((section) => {
-                              const sectionValue = section.name;
+                              const sectionValue = String(section.id);
                               return (
                                 <FormField
                                   key={section.id}
@@ -720,15 +731,16 @@ export default function UsersPage() {
                       </FormItem>
                     )}
                   />
+
                   <FormField
-                    control={editForm.control}
-                    name="settings.allowMultiplier"
+                    control={editForm.control} // IMPORTANTE: Mude para editForm.control no formulário de edição!
+                    name="settings.canAuthorizeOwnExceptions"
                     render={({ field }) => (
                       <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
                         <div className="space-y-0.5">
-                          <FormLabel>Permitir Multiplicador</FormLabel>
+                          <FormLabel>Auto-autorizar Exceções</FormLabel>
                           <FormDescription>
-                            Permite usar multiplicador de quantidade
+                            Permite autorizar suas próprias exceções
                           </FormDescription>
                         </div>
                         <FormControl>

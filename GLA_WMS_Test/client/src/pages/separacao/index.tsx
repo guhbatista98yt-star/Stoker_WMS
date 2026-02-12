@@ -32,8 +32,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { WorkUnitWithDetails, OrderItem, Product, ExceptionType, UserSettings } from "@shared/schema";
+import type { WorkUnitWithDetails, OrderItem, Product, ExceptionType, UserSettings, Exception } from "@shared/schema";
 import { ExceptionDialog } from "@/components/orders/exception-dialog";
+import { ExceptionAuthorizationModal } from "@/components/orders/exception-authorization-modal";
 import { getCurrentWeekRange } from "@/lib/date-utils";
 import { format } from "date-fns";
 
@@ -51,6 +52,7 @@ interface SessionData {
 interface ItemWithProduct extends OrderItem {
   product: Product;
   exceptionQty?: number;
+  exceptions?: Exception[];
 }
 
 interface AggregatedProduct {
@@ -66,21 +68,21 @@ interface AggregatedProduct {
 function saveSession(data: SessionData) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch {}
+  } catch { }
 }
 
 function loadSession(): SessionData | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
-  } catch {}
+  } catch { }
   return null;
 }
 
 function clearSession() {
   try {
     localStorage.removeItem(STORAGE_KEY);
-  } catch {}
+  } catch { }
 }
 
 export default function SeparacaoPage() {
@@ -114,6 +116,8 @@ export default function SeparacaoPage() {
 
   const [showExceptionDialog, setShowExceptionDialog] = useState(false);
   const [exceptionItem, setExceptionItem] = useState<ItemWithProduct | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [pendingExceptions, setPendingExceptions] = useState<any[]>([]);
 
   const [filterOrderId, setFilterOrderId] = useState("");
   const [dateRange, setDateRange] = useState<DateRange | undefined>(getCurrentWeekRange());
@@ -122,11 +126,10 @@ export default function SeparacaoPage() {
 
   const [sessionRestored, setSessionRestored] = useState(false);
   const [multiplierValue, setMultiplierValue] = useState(1);
-  const [manualQtyAllowed, setManualQtyAllowed] = useState<Record<string, boolean>>({});
 
   const userSettings = (user?.settings as UserSettings) || {};
   const hasManualQtyPermission = !!userSettings.allowManualQty;
-  const hasMultiplierPermission = !!userSettings.allowMultiplier;
+  // const hasMultiplierPermission = !!userSettings.allowMultiplier;
 
   const workUnitsQueryKey = useSessionQueryKey(["/api/work-units", "separacao"]);
 
@@ -134,6 +137,12 @@ export default function SeparacaoPage() {
     queryKey: workUnitsQueryKey,
     refetchInterval: 1000,
   });
+
+  const { data: sections } = useQuery<{ id: string; name: string }[]>({
+    queryKey: ["/api/sections"],
+  });
+
+
 
   const handleSSEMessage = useCallback((type: string, _data: any) => {
     queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
@@ -212,32 +221,63 @@ export default function SeparacaoPage() {
     return Array.from(secs).sort();
   }, [aggregatedProducts]);
 
+  // Buscar regras de quantidade manual para os produtos atuais
+  const productIds = useMemo(() => aggregatedProducts.map(ap => ap.product.id), [aggregatedProducts]);
+  const { data: manualQtyRulesMap } = useQuery<Record<string, boolean>>({
+    queryKey: ["manual-qty-rules", productIds],
+    queryFn: async () => {
+      if (productIds.length === 0) return {};
+      const res = await apiRequest("POST", "/api/manual-qty-rules/check", { productIds });
+      return res.json();
+    },
+    enabled: productIds.length > 0,
+  });
+
   const currentProduct = filteredAggregatedProducts[currentProductIndex] || filteredAggregatedProducts[0] || null;
+
+  // Permissão efetiva: Global do usuário OU Regra específica do produto
+  const canUseManualQty = useMemo(() => {
+    if (hasManualQtyPermission) return true;
+    if (currentProduct && manualQtyRulesMap) {
+      return !!manualQtyRulesMap[currentProduct.product.id];
+    }
+    return false;
+  }, [hasManualQtyPermission, currentProduct, manualQtyRulesMap]);
+
+  // Avanço automático quando produto atual é completado
+  useEffect(() => {
+    if (currentProduct && step === "picking") {
+      const isComplete = currentProduct.separatedQty + currentProduct.exceptionQty >= currentProduct.totalQty;
+
+      if (isComplete) {
+        console.log(`[DEBUG] Produto ${currentProduct.product.id} completo. Buscando pr\u00f3ximo...`);
+        // Tentar encontrar p\u00f3ximo incompleto (circular)
+        let nextIdx = filteredAggregatedProducts.findIndex((p, idx) =>
+          idx > currentProductIndex && (p.separatedQty + p.exceptionQty < p.totalQty)
+        );
+
+        // Se n\u00e3o achou depois, tenta do in\u00edcio
+        if (nextIdx === -1) {
+          nextIdx = filteredAggregatedProducts.findIndex((p, idx) =>
+            idx < currentProductIndex && (p.separatedQty + p.exceptionQty < p.totalQty)
+          );
+        }
+
+        if (nextIdx >= 0 && nextIdx !== currentProductIndex) {
+          console.log(`[DEBUG] Avan\u00e7ando para o \u00edndice ${nextIdx}`);
+          setCurrentProductIndex(nextIdx);
+        } else {
+          console.log(`[DEBUG] Nenhum outro produto incompleto encontrado.`);
+        }
+      }
+    }
+  }, [currentProduct?.separatedQty, currentProduct?.exceptionQty, currentProduct?.totalQty, step, filteredAggregatedProducts, currentProductIndex]);
 
   useEffect(() => {
     if (filteredAggregatedProducts.length > 0 && currentProductIndex >= filteredAggregatedProducts.length) {
       setCurrentProductIndex(0);
     }
   }, [filteredAggregatedProducts.length, currentProductIndex]);
-
-  useEffect(() => {
-    if (!hasManualQtyPermission && !hasMultiplierPermission) return;
-    if (aggregatedProducts.length === 0) return;
-
-    const productIds = aggregatedProducts.map(ap => ap.product.id).filter(id => !(id in manualQtyAllowed));
-    if (productIds.length === 0) return;
-
-    apiRequest("POST", "/api/manual-qty-rules/check", { productIds })
-      .then(res => res.json())
-      .then((results: Record<string, boolean>) => {
-        setManualQtyAllowed(prev => ({ ...prev, ...results }));
-      })
-      .catch(() => {
-        const fallback: Record<string, boolean> = {};
-        productIds.forEach(id => { fallback[id] = false; });
-        setManualQtyAllowed(prev => ({ ...prev, ...fallback }));
-      });
-  }, [aggregatedProducts, hasManualQtyPermission, hasMultiplierPermission]);
 
   useEffect(() => {
     if (workUnits && user && !sessionRestored) {
@@ -289,9 +329,9 @@ export default function SeparacaoPage() {
     },
   });
 
-  const scanCartMutation = useMutation({
-    mutationFn: async ({ workUnitId, qrCode }: { workUnitId: string; qrCode: string }) => {
-      const res = await apiRequest("POST", `/api/work-units/${workUnitId}/scan-cart`, { qrCode });
+  const batchScanCartMutation = useMutation({
+    mutationFn: async ({ workUnitIds, qrCode }: { workUnitIds: string[]; qrCode: string }) => {
+      const res = await apiRequest("POST", "/api/work-units/batch/scan-cart", { workUnitIds, qrCode });
       return res.json();
     },
     onSuccess: () => {
@@ -319,8 +359,9 @@ export default function SeparacaoPage() {
   });
 
   const scanItemMutation = useMutation({
-    mutationFn: async ({ workUnitId, barcode }: { workUnitId: string; barcode: string }) => {
-      const res = await apiRequest("POST", `/api/work-units/${workUnitId}/scan-item`, { barcode });
+    mutationFn: async ({ workUnitId, barcode, quantity }: { workUnitId: string; barcode: string; quantity?: number }) => {
+      const body = quantity ? { barcode, quantity } : { barcode };
+      const res = await apiRequest("POST", `/api/work-units/${workUnitId}/scan-item`, body);
       return res.json();
     },
     onSuccess: (data) => {
@@ -356,7 +397,7 @@ export default function SeparacaoPage() {
       try {
         const errorData = JSON.parse(error.message);
         if (errorData.error) message = errorData.error;
-      } catch {}
+      } catch { }
       toast({ title: "Erro", description: message, variant: "destructive" });
     },
   });
@@ -364,13 +405,14 @@ export default function SeparacaoPage() {
   const completeWorkUnitMutation = useMutation({
     mutationFn: async (id: string) => {
       const res = await apiRequest("POST", `/api/work-units/${id}/complete`);
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Erro ao concluir unidade");
+      }
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
-    },
-    onError: () => {
-      toast({ title: "Erro", description: "Itens pendentes.", variant: "destructive" });
     },
   });
 
@@ -388,6 +430,16 @@ export default function SeparacaoPage() {
     },
   });
 
+  // Helper para busca múltipla por vírgula
+  const processMultipleOrderSearch = (searchValue: string, orderCode: string): boolean => {
+    if (!searchValue.trim()) return true;
+    if (searchValue.includes(',')) {
+      const terms = searchValue.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+      return terms.some(term => orderCode.toLowerCase().includes(term));
+    }
+    return orderCode.toLowerCase().includes(searchValue.toLowerCase());
+  };
+
   const availableWorkUnits = useMemo(() => {
     return workUnits?.filter((wu) => {
       if (wu.status !== "pendente" || (wu.lockedBy && wu.lockedBy !== user?.id)) return false;
@@ -400,7 +452,8 @@ export default function SeparacaoPage() {
         if (!wu.section && !hasRelevantItems) return false;
       }
 
-      if (filterOrderId && !wu.order.erpOrderId.toLowerCase().includes(filterOrderId.toLowerCase())) return false;
+      // Busca múltipla por vírgula
+      if (filterOrderId && !processMultipleOrderSearch(filterOrderId, wu.order.erpOrderId)) return false;
 
       if (dateRange?.from) {
         const orderDate = new Date(wu.order.createdAt);
@@ -457,9 +510,8 @@ export default function SeparacaoPage() {
     if (units.length === 0) return;
 
     try {
-      for (const wu of units) {
-        await scanCartMutation.mutateAsync({ workUnitId: wu.id, qrCode });
-      }
+      const workUnitIds = units.map(wu => wu.id);
+      await batchScanCartMutation.mutateAsync({ workUnitIds, qrCode });
       setScanStatus("success");
       setScanMessage("Cesto/carrinho registrado!");
       setTimeout(() => {
@@ -473,6 +525,86 @@ export default function SeparacaoPage() {
       setScanStatus("error");
       setScanMessage("Erro ao registrar cesto/carrinho");
     }
+  };
+
+  const handleCompleteAll = async () => {
+    // Verificar se há exceções não autorizadas
+    const allExceptions: Exception[] = [];
+    allMyUnits.forEach(wu => {
+      wu.items.forEach((item: ItemWithProduct) => {
+        if (item.exceptions && item.exceptions.length > 0) {
+          item.exceptions.forEach((exc: Exception) => {
+            if (!exc.authorizedBy) {
+              allExceptions.push({
+                ...exc,
+                orderItem: {
+                  ...item,
+                  order: wu.order,
+                },
+              } as any);
+            }
+          });
+        }
+      });
+    });
+
+    if (allExceptions.length > 0) {
+      const userSettings = user?.settings as UserSettings;
+      if (userSettings?.canAuthorizeOwnExceptions) {
+        try {
+          await apiRequest("POST", "/api/exceptions/auto-authorize", {
+            exceptionIds: allExceptions.map(e => e.id),
+          });
+          toast({ title: "Auto-autorização", description: "Exceções autorizadas automaticamente." });
+        } catch (error) {
+          toast({ title: "Erro", description: "Falha ao auto-autorizar exceções", variant: "destructive" });
+          return;
+        }
+      } else {
+        setPendingExceptions(allExceptions);
+        setShowAuthModal(true);
+        return;
+      }
+    }
+
+    // Continuar com finalização normal
+    await finalizeWorkUnits();
+  };
+
+  const finalizeWorkUnits = async () => {
+    try {
+      let anyUnlock = false;
+      for (const wu of allMyUnits) {
+        try {
+          await completeWorkUnitMutation.mutateAsync(wu.id);
+        } catch (error: any) {
+          // Se falhar porque há itens pendentes (outras seções), fazemos apenas unlock
+          if (error.message === "Existem itens pendentes" || error.message?.includes("pendentes")) {
+            // console.log(`Unidade ${wu.id} tem itens pendentes de outras seções. Liberando bloqueio.`);
+            await unlockMutation.mutateAsync({ ids: [wu.id], reset: false });
+            anyUnlock = true;
+          } else {
+            throw error;
+          }
+        }
+      }
+      setStep("select");
+      setSelectedWorkUnits([]);
+      clearSession();
+      if (anyUnlock) {
+        toast({ title: "Salvo", description: "Sua parte foi concluída. Pedido liberado para outras seções.", variant: "default" });
+      } else {
+        toast({ title: "Concluído", description: "Separação finalizada com sucesso", variant: "default" });
+      }
+    } catch (error) {
+      console.error("Error completing work units:", error);
+      toast({ title: "Erro", description: "Falha ao finalizar separação", variant: "destructive" });
+    }
+  };
+
+  const handleExceptionAuthorized = async () => {
+    await queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+    await finalizeWorkUnits();
   };
 
   const handleScanItem = useCallback(async (barcode: string) => {
@@ -550,59 +682,65 @@ export default function SeparacaoPage() {
     const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
     if (remaining <= 0) return;
 
-    const effectiveQty = Math.min(qty, remaining);
+    // Verificar permissão para multiplicador - REMOVIDO (Unificado com Qtd Manual)
+    /*
+    if (qty > 1 && !hasMultiplierPermission) {
+      toast({
+        title: "Permissão Negada",
+        description: "Você não tem permissão para usar multiplicador",
+        variant: "destructive"
+      });
+      return;
+    }
+    */
+
+    // Verificar permissão para quantidade manual
+    // Regra: Apenas switch global do usuário OU Regra de Produto
+    if (!canUseManualQty) {
+      toast({
+        title: "Permissão Negada",
+        description: "Você não tem permissão para alterar quantidade manual",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    // Enviar quantidade digitada ao backend sem limitar
+    // O backend aplicará a regra: se exceder, reseta para zero
     const barcode = ap.product.barcode;
     if (!barcode) return;
 
     try {
-      let successCount = 0;
-      for (let i = 0; i < effectiveQty; i++) {
-        const incompleteItem = ap.items.find(it =>
-          Number(it.separatedQty) + Number(it.exceptionQty || 0) + successCount < Number(it.quantity)
-        );
-        if (!incompleteItem) break;
-        const wu = allMyUnits.find(w => w.items.some(it => it.id === incompleteItem.id));
-        if (!wu) break;
+      // Encontrar o primeiro item incompleto
+      const incompleteItem = ap.items.find(it =>
+        Number(it.separatedQty) + Number(it.exceptionQty || 0) < Number(it.quantity)
+      );
+      if (!incompleteItem) return;
 
-        try {
-          const result = await scanItemMutation.mutateAsync({ workUnitId: wu.id, barcode });
-          if (result.status === "success") {
-            successCount++;
-          } else {
-            break;
-          }
-        } catch {
-          break;
-        }
-      }
-      if (successCount > 0) {
+      const wu = allMyUnits.find(w => w.items.some(it => it.id === incompleteItem.id));
+      if (!wu) return;
+
+      const result = await scanItemMutation.mutateAsync({
+        workUnitId: wu.id,
+        barcode,
+        quantity: qty
+      });
+
+      if (result.status === "success") {
         setScanStatus("success");
-        setScanMessage(`+${successCount} ${ap.product.name}`);
+        setScanMessage(`+${result.quantity} ${ap.product.name}`);
         setMultiplierValue(1);
+        // O avanço automático agora é feito pelo useEffect que observa mudanças no currentProduct
+      } else if (result.status === "over_quantity" || result.status === "over_quantity_with_exception") {
+        setScanStatus("error");
+        setScanMessage(result.message || "Quantidade excedida! Separação resetada.");
       } else {
         setScanStatus("error");
-        setScanMessage("Quantidade excedida!");
+        setScanMessage("Erro ao incrementar");
       }
     } catch {
       setScanStatus("error");
       setScanMessage("Erro ao incrementar");
-    }
-  };
-
-  const handleCompleteAll = async () => {
-    const incompleteUnits = myLockedUnits.filter(wu => wu.status !== "concluido");
-    try {
-      for (const wu of incompleteUnits) {
-        await completeWorkUnitMutation.mutateAsync(wu.id);
-      }
-      clearSession();
-      setStep("select");
-      setSelectedWorkUnits([]);
-      setCurrentProductIndex(0);
-      setPickingTab("product");
-      toast({ title: "Separação Concluída!", description: "Todos os itens foram separados com sucesso." });
-    } catch {
-      toast({ title: "Erro", description: "Falha ao concluir. Verifique itens pendentes.", variant: "destructive" });
     }
   };
 
@@ -671,7 +809,7 @@ export default function SeparacaoPage() {
             <div className="flex items-center gap-2">
               <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               <Input
-                placeholder="N° Pedido..."
+                placeholder="N° Pedido (separe múltiplos por vírgula)"
                 value={filterOrderId}
                 onChange={(e) => setFilterOrderId(e.target.value)}
                 className="h-8 text-xs"
@@ -699,54 +837,61 @@ export default function SeparacaoPage() {
               ))}
             </div>
           ) : groupedWorkUnits.length > 0 ? (
-            <div className="space-y-1.5">
-              {groupedWorkUnits.map((group) => {
-                const firstWU = group[0];
-                const groupIds = group.map(g => g.id);
-                const isSelected = groupIds.every(id => selectedWorkUnits.includes(id));
+            <div className="space-y-3">
+              {/* Lista com scroll */}
+              <div className="max-h-[400px] overflow-y-auto border rounded-lg">
+                <div className="space-y-1.5 p-2">
+                  {groupedWorkUnits.map((group) => {
+                    const firstWU = group[0];
+                    const groupIds = group.map(g => g.id);
+                    const isSelected = groupIds.every(id => selectedWorkUnits.includes(id));
 
-                const userSections = (user?.sections as string[]) || [];
-                const totalItems = group.reduce((acc, wu) => {
-                  const filtered = wu.items?.filter(item =>
-                    userSections.length === 0 || userSections.includes(item.section)
-                  ) || [];
-                  return acc + filtered.reduce((s, item) => s + Number(item.quantity), 0);
-                }, 0);
+                    const userSections = (user?.sections as string[]) || [];
+                    const distinctProductCount = group.reduce((acc, wu) => {
+                      const filtered = wu.items?.filter(item =>
+                        userSections.length === 0 || userSections.includes(item.section)
+                      ) || [];
+                      const productIds = new Set(filtered.map(item => item.productId));
+                      return new Set([...acc, ...productIds]);
+                    }, new Set<string>()).size;
 
-                let createdAt = "";
-                try {
-                  createdAt = format(new Date(firstWU.order.createdAt), "dd/MM HH:mm");
-                } catch {}
+                    let createdAt = "";
+                    try {
+                      createdAt = format(new Date(firstWU.order.createdAt), "dd/MM HH:mm");
+                    } catch { }
 
-                return (
-                  <div
-                    key={firstWU.orderId}
-                    className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${isSelected ? "border-primary bg-primary/5" : "border-border"}`}
-                    onClick={() => handleSelectGroup(group, !isSelected)}
-                    data-testid={`order-group-${firstWU.orderId}`}
-                  >
-                    <Checkbox
-                      checked={isSelected}
-                      onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
-                      className="shrink-0"
-                      data-testid={`checkbox-order-${firstWU.orderId}`}
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-mono text-sm font-semibold">{firstWU.order.erpOrderId}</span>
+                    return (
+                      <div
+                        key={firstWU.orderId}
+                        className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${isSelected ? "border-primary bg-primary/5" : "border-border"}`}
+                        onClick={() => handleSelectGroup(group, !isSelected)}
+                        data-testid={`order-group-${firstWU.orderId}`}
+                      >
+                        <Checkbox
+                          checked={isSelected}
+                          onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
+                          className="shrink-0"
+                          data-testid={`checkbox-order-${firstWU.orderId}`}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono text-sm font-semibold">{firstWU.order.erpOrderId}</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground truncate">{firstWU.order.customerName}</p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-medium">{distinctProductCount} produtos</p>
+                          <p className="text-[10px] text-muted-foreground">{createdAt}</p>
+                        </div>
                       </div>
-                      <p className="text-xs text-muted-foreground truncate">{firstWU.order.customerName}</p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-xs font-medium">{totalItems} itens</p>
-                      <p className="text-[10px] text-muted-foreground">{createdAt}</p>
-                    </div>
-                  </div>
-                );
-              })}
+                    );
+                  })}
+                </div>
+              </div>
 
+              {/* Botão fixo separado */}
               <Button
-                className="w-full h-11 text-sm mt-3"
+                className="w-full h-11 text-sm"
                 onClick={handleStartSeparation}
                 disabled={selectedWorkUnits.length === 0 || lockMutation.isPending}
                 data-testid="button-start-separation"
@@ -827,7 +972,7 @@ export default function SeparacaoPage() {
             />
           </div>
 
-          <div className="flex-1 overflow-auto">
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             {pickingTab === "product" && currentProduct && (
               <div className="px-3 py-3 space-y-3">
                 <div className="bg-card border border-border rounded-lg p-3 space-y-2.5">
@@ -838,16 +983,16 @@ export default function SeparacaoPage() {
                   </div>
 
                   <p className="text-sm font-medium leading-tight">{currentProduct.product.name}</p>
+                  {currentProduct.product.manufacturer && (
+                    <p className="text-xs text-muted-foreground mt-0.5">Fabricante: {currentProduct.product.manufacturer}</p>
+                  )}
 
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
                     <div>
                       <span className="text-muted-foreground">Código:</span>
                       <span className="ml-1 font-mono font-medium">{currentProduct.product.erpCode}</span>
                     </div>
-                    <div>
-                      <span className="text-muted-foreground">Ref:</span>
-                      <span className="ml-1 font-mono">{currentProduct.product.referenceCode || "—"}</span>
-                    </div>
+
                     <div>
                       <span className="text-muted-foreground">Cód. Barras:</span>
                       <span className="ml-1 font-mono">{currentProduct.product.barcode || "—"}</span>
@@ -870,7 +1015,7 @@ export default function SeparacaoPage() {
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
-                      {(hasManualQtyPermission || hasMultiplierPermission) && manualQtyAllowed[currentProduct.product.id] && (
+                      {canUseManualQty && (
                         <>
                           <div className="flex items-center gap-1">
                             <span className="text-xs text-muted-foreground">Qtd:</span>
@@ -879,9 +1024,12 @@ export default function SeparacaoPage() {
                               min={1}
                               max={currentProduct.totalQty - currentProduct.separatedQty - currentProduct.exceptionQty}
                               value={multiplierValue}
-                              onChange={(e) => setMultiplierValue(Math.max(1, parseInt(e.target.value) || 1))}
+                              onChange={(e) => {
+                                const newVal = Math.max(1, parseInt(e.target.value) || 1);
+                                setMultiplierValue(newVal);
+                              }}
                               className="h-10 w-20 text-center text-sm font-bold"
-                              disabled={!hasMultiplierPermission}
+                            // disabled={!hasMultiplierPermission} // Merged logic: always enabled if blocking condition is met (block is rendered)
                             />
                           </div>
                           <Button
@@ -955,110 +1103,120 @@ export default function SeparacaoPage() {
             )}
 
             {pickingTab === "product" && !currentProduct && filteredAggregatedProducts.length === 0 && (
-              <div className="flex items-center justify-center h-40 text-muted-foreground text-sm">
+              <div className="flex-1 flex items-center justify-center p-4 text-muted-foreground text-sm">
                 Nenhum produto para separar
               </div>
             )}
 
             {pickingTab === "list" && (
-              <div className="px-3 py-3 space-y-2">
-                {availableSections.length > 1 && (
-                  <Select value={sectionFilter} onValueChange={setSectionFilter}>
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue placeholder="Todas as seções" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">Todas as seções</SelectItem>
-                      {availableSections.map(s => (
-                        <SelectItem key={s} value={s}>{s}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
+              <div className="flex flex-col h-full min-h-0">
+                <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
+                  {availableSections.length > 1 && (
+                    <Select value={sectionFilter} onValueChange={setSectionFilter}>
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue placeholder="Todas as se\u00e7\u00f5es" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Todas as se\u00e7\u00f5es</SelectItem>
+                        {availableSections.map(sid => {
+                          const secName = sections?.find(s => String(s.id) === sid)?.name;
+                          return (
+                            <SelectItem key={sid} value={sid}>
+                              {secName ? `${sid} - ${secName}` : sid}
+                            </SelectItem>
+                          );
+                        })}
+                      </SelectContent>
+                    </Select>
+                  )}
 
-                {filteredAggregatedProducts.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground text-xs">
-                    Nenhum produto encontrado
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {filteredAggregatedProducts.map((ap, idx) => {
-                      const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
-                      const isComplete = remaining <= 0;
-                      const hasException = ap.exceptionQty > 0;
+                  {filteredAggregatedProducts.length === 0 ? (
+                    <div className="text-center py-8 text-muted-foreground text-xs">
+                      Nenhum produto encontrado
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      {filteredAggregatedProducts.map((ap, idx) => {
+                        const remaining = ap.totalQty - ap.separatedQty - ap.exceptionQty;
+                        const isComplete = remaining <= 0;
+                        const hasException = ap.exceptionQty > 0;
 
-                      return (
-                        <div
-                          key={ap.product.id}
-                          className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-colors ${
-                            isComplete
+                        return (
+                          <div
+                            key={ap.product.id}
+                            className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-colors ${isComplete
                               ? hasException
                                 ? "bg-amber-50/50 border-amber-200 dark:bg-amber-950/20 dark:border-amber-900/50"
                                 : "bg-green-50/50 border-green-200 dark:bg-green-950/20 dark:border-green-900/50"
                               : "border-border hover:bg-muted/50"
-                          }`}
-                          onClick={() => {
-                            setCurrentProductIndex(idx);
-                            setPickingTab("product");
-                          }}
-                        >
-                          <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
-                            isComplete
+                              }`}
+                            onClick={() => {
+                              setCurrentProductIndex(idx);
+                              setPickingTab("product");
+                            }}
+                          >
+                            <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${isComplete
                               ? hasException ? "bg-amber-500 text-white" : "bg-green-500 text-white"
                               : "bg-muted"
-                          }`}>
-                            {isComplete ? (
-                              hasException ? <AlertTriangle className="h-3 w-3" /> : <Check className="h-3 w-3" />
-                            ) : (
-                              <span className="text-[10px] font-medium">{remaining}</span>
-                            )}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-medium truncate">{ap.product.name}</p>
-                            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                              <span className="font-mono">{ap.product.erpCode}</span>
-                              <span>•</span>
-                              <span className="font-mono">{ap.product.barcode || "—"}</span>
+                              }`}>
+                              {isComplete ? (
+                                hasException ? <AlertTriangle className="h-3 w-3" /> : <Check className="h-3 w-3" />
+                              ) : (
+                                <span className="text-[10px] font-medium">{remaining}</span>
+                              )}
                             </div>
-                            <div className="flex items-center gap-1 mt-0.5">
-                              {ap.orderCodes.map(code => (
-                                <span key={code} className="text-[9px] bg-muted px-1 py-0.5 rounded font-mono">{code}</span>
-                              ))}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-medium truncate">{ap.product.name}</p>
+                              {ap.product.manufacturer && (
+                                <p className="text-[10px] text-muted-foreground truncate">Fabricante: {ap.product.manufacturer}</p>
+                              )}
+                              <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                                <span className="font-mono">{ap.product.erpCode}</span>
+                                <span>\u2022</span>
+                                <span className="font-mono">{ap.product.barcode || "\u2014"}</span>
+                              </div>
+                              <div className="flex items-center gap-1 mt-0.5">
+                                {ap.orderCodes.map(code => (
+                                  <span key={code} className="text-[9px] bg-muted px-1 py-0.5 rounded font-mono">{code}</span>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <p className="text-xs font-medium">
+                                {ap.separatedQty}/{ap.totalQty}
+                              </p>
+                              {ap.exceptionQty > 0 && (
+                                <span className="text-[10px] text-orange-500">-{ap.exceptionQty}</span>
+                              )}
                             </div>
                           </div>
-                          <div className="text-right shrink-0">
-                            <p className="text-xs font-medium">
-                              {ap.separatedQty}/{ap.totalQty}
-                            </p>
-                            {ap.exceptionQty > 0 && (
-                              <span className="text-[10px] text-orange-500">-{ap.exceptionQty}</span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
 
-                <div className="flex gap-2 pt-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="flex-1 h-9 text-xs text-destructive border-destructive/30 hover:bg-destructive/10"
-                    onClick={handleCancelPicking}
-                    disabled={unlockMutation.isPending}
-                  >
-                    Cancelar
-                  </Button>
-                  <Button
-                    size="sm"
-                    className="flex-1 h-9 text-xs bg-green-600 hover:bg-green-700"
-                    onClick={handleCompleteAll}
-                    disabled={!allItemsComplete || completeWorkUnitMutation.isPending}
-                  >
-                    <Check className="h-3.5 w-3.5 mr-1" />
-                    Concluir
-                  </Button>
+                <div className="p-3 border-t bg-background mt-auto">
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 h-9 text-xs text-destructive border-destructive/30 hover:bg-destructive/10"
+                      onClick={handleCancelPicking}
+                      disabled={unlockMutation.isPending}
+                    >
+                      Cancelar
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="flex-1 h-9 text-xs bg-green-600 hover:bg-green-700"
+                      onClick={handleCompleteAll}
+                      disabled={!allItemsComplete || completeWorkUnitMutation.isPending}
+                    >
+                      <Check className="h-3.5 w-3.5 mr-1" />
+                      Concluir
+                    </Button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1066,18 +1224,16 @@ export default function SeparacaoPage() {
 
           <nav className="flex border-t border-border bg-card shrink-0">
             <button
-              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${
-                pickingTab === "product" ? "text-primary bg-primary/5" : "text-muted-foreground"
-              }`}
+              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${pickingTab === "product" ? "text-primary bg-primary/5" : "text-muted-foreground"
+                }`}
               onClick={() => setPickingTab("product")}
             >
               <Package className="h-5 w-5" />
               <span className="text-[10px] font-medium">Produto</span>
             </button>
             <button
-              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${
-                pickingTab === "list" ? "text-primary bg-primary/5" : "text-muted-foreground"
-              }`}
+              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${pickingTab === "list" ? "text-primary bg-primary/5" : "text-muted-foreground"
+                }`}
               onClick={() => setPickingTab("list")}
             >
               <List className="h-5 w-5" />
@@ -1108,7 +1264,9 @@ export default function SeparacaoPage() {
               createExceptionMutation.mutate({
                 workUnitId: wu.id,
                 orderItemId: exceptionItem.id,
-                ...data,
+                type: data.type,
+                quantity: data.quantity,
+                observation: data.observation,
               });
             }
           }}
@@ -1120,6 +1278,13 @@ export default function SeparacaoPage() {
           isClearing={clearExceptionsMutation.isPending}
         />
       )}
+
+      <ExceptionAuthorizationModal
+        open={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        exceptions={pendingExceptions}
+        onAuthorized={handleExceptionAuthorized}
+      />
     </div>
   );
 }

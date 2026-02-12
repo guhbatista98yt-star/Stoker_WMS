@@ -24,14 +24,14 @@ export function setupSSE(app: Express) {
         };
 
         clients.push(newClient);
-        console.log(`[SSE] Client connected: ${clientId} (User: ${userId || 'anonymous'})`);
+        // console.log(`[SSE] Client connected: ${clientId} (User: ${userId || 'anonymous'})`);
 
         // Send initial connection message
         res.write(`data: ${JSON.stringify({ type: 'connected', clientId })}\n\n`);
 
         // Remove client on close
         req.on('close', () => {
-            console.log(`[SSE] Client disconnected: ${clientId}`);
+            // console.log(`[SSE] Client disconnected: ${clientId}`);
             clients = clients.filter(client => client.id !== clientId);
         });
     });

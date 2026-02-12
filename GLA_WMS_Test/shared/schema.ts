@@ -1,8 +1,8 @@
-import { pgTable, text, integer, real, boolean as pgBoolean, jsonb, serial, doublePrecision, unique } from "drizzle-orm/pg-core";
+import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-const boolean = (name: string) => pgBoolean(name);
+const boolean = (name: string) => integer(name, { mode: 'boolean' });
 const timestamp = (name: string) => text(name);
 
 export const userRoleEnum = ["administrador", "supervisor", "separacao", "conferencia", "balcao", "fila_pedidos"] as const;
@@ -26,21 +26,22 @@ export type WorkUnitType = typeof workUnitTypeEnum[number];
 export interface UserSettings {
   allowManualQty?: boolean;
   allowMultiplier?: boolean;
+  canAuthorizeOwnExceptions?: boolean;
 }
 
-export const users = pgTable("users", {
+export const users = sqliteTable("users", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   username: text("username").notNull(),
   password: text("password").notNull(),
   name: text("name").notNull(),
   role: text("role").notNull().default("separacao").$type<UserRole>(),
-  sections: jsonb("sections"),
-  settings: jsonb("settings").$type<UserSettings>().default({}),
+  sections: text("sections", { mode: "json" }),
+  settings: text("settings", { mode: "json" }).$type<UserSettings>().default({}),
   active: boolean("active").notNull().default(true),
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
 });
 
-export const routes = pgTable("routes", {
+export const routes = sqliteTable("routes", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   code: text("code").notNull(),
   name: text("name").notNull(),
@@ -49,32 +50,38 @@ export const routes = pgTable("routes", {
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
 });
 
-export const sections = pgTable("sections", {
+export const sections = sqliteTable("sections", {
   id: integer("id").primaryKey(),
   name: text("name").notNull(),
 });
 
-export const sectionGroups = pgTable("section_groups", {
+export const pickupPoints = sqliteTable("pickup_points", {
+  id: integer("id").primaryKey(),
+  name: text("name").notNull(),
+  active: boolean("active").notNull().default(true),
+});
+
+export const sectionGroups = sqliteTable("section_groups", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   name: text("name").notNull(),
-  sections: jsonb("sections").$type<string[]>().notNull(),
+  sections: text("sections", { mode: "json" }).$type<string[]>().notNull(),
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
   updatedAt: timestamp("updated_at").notNull().default(new Date().toISOString()),
 });
 
-export const cacheOrcamentos = pgTable("cache_orcamentos", {
-  id: serial("id").primaryKey(),
+export const cacheOrcamentos = sqliteTable("cache_orcamentos", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   chave: text("CHAVE").notNull(),
   idEmpresa: integer("IDEMPRESA"),
   idOrcamento: integer("IDORCAMENTO"),
   idProduto: text("IDPRODUTO"),
   idSubProduto: text("IDSUBPRODUTO"),
   numSequencia: integer("NUMSEQUENCIA"),
-  qtdProduto: doublePrecision("QTDPRODUTO"),
+  qtdProduto: real("QTDPRODUTO"),
   unidade: text("UNIDADE"),
   fabricante: text("FABRICANTE"),
-  valUnitBruto: doublePrecision("VALUNITBRUTO"),
-  valTotLiquido: doublePrecision("VALTOTLIQUIDO"),
+  valUnitBruto: real("VALUNITBRUTO"),
+  valTotLiquido: real("VALTOTLIQUIDO"),
   descrResProduto: text("DESCRRESPRODUTO"),
   idVendedor: text("IDVENDEDOR"),
   idLocalRetirada: integer("IDLOCALRETIRADA"),
@@ -96,10 +103,9 @@ export const cacheOrcamentos = pgTable("cache_orcamentos", {
   codBarrasCaixa: text("CODBARRAS_CAIXA"),
 });
 
-export const products = pgTable("products", {
+export const products = sqliteTable("products", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   erpCode: text("erp_code").notNull(),
-  referenceCode: text("reference_code"),
   barcode: text("barcode"),
   boxBarcode: text("box_barcode"),
   name: text("name").notNull(),
@@ -107,57 +113,57 @@ export const products = pgTable("products", {
   pickupPoint: integer("pickup_point").notNull(),
   unit: text("unit").notNull().default("UN"),
   manufacturer: text("manufacturer"),
-  price: doublePrecision("price").notNull().default(0),
-  stockQty: doublePrecision("stock_qty").notNull().default(0),
+  price: real("price").notNull().default(0),
+  stockQty: real("stock_qty").notNull().default(0),
   erpUpdatedAt: timestamp("erp_updated_at"),
 });
 
-export const orders = pgTable("orders", {
+export const orders = sqliteTable("orders", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   erpOrderId: text("erp_order_id").notNull().unique(),
   customerName: text("customer_name").notNull(),
   customerCode: text("customer_code"),
-  totalValue: doublePrecision("total_value").notNull().default(0),
+  totalValue: real("total_value").notNull().default(0),
   observation: text("observation"),
   status: text("status").notNull().default("pendente").$type<OrderStatus>(),
   priority: integer("priority").notNull().default(0),
   isLaunched: boolean("is_launched").notNull().default(false),
   routeId: text("route_id").references(() => routes.id),
   separationCode: text("separation_code"),
-  pickupPoints: jsonb("pickup_points"),
+  pickupPoints: text("pickup_points", { mode: "json" }),
   erpUpdatedAt: timestamp("erp_updated_at"),
   financialStatus: text("financial_status").notNull().default("pendente"),
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
   updatedAt: timestamp("updated_at").notNull().default(new Date().toISOString()),
 });
 
-export const orderItems = pgTable("order_items", {
+export const orderItems = sqliteTable("order_items", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   orderId: text("order_id").notNull().references(() => orders.id),
   productId: text("product_id").notNull().references(() => products.id),
-  quantity: doublePrecision("quantity").notNull(),
-  separatedQty: doublePrecision("separated_qty").notNull().default(0),
-  checkedQty: doublePrecision("checked_qty").notNull().default(0),
+  quantity: real("quantity").notNull(),
+  separatedQty: real("separated_qty").notNull().default(0),
+  checkedQty: real("checked_qty").notNull().default(0),
   section: text("section").notNull(),
   pickupPoint: integer("pickup_point").notNull(),
-  qtyPicked: doublePrecision("qty_picked").default(0),
-  qtyChecked: doublePrecision("qty_checked").default(0),
+  qtyPicked: real("qty_picked").default(0),
+  qtyChecked: real("qty_checked").default(0),
   status: text("status").default("pendente").$type<ItemStatus>(),
   exceptionType: text("exception_type").$type<ExceptionType>(),
 });
 
-export const pickingSessions = pgTable("picking_sessions", {
+export const pickingSessions = sqliteTable("picking_sessions", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   userId: text("user_id").notNull().references(() => users.id),
   orderId: text("order_id").notNull().references(() => orders.id),
   sectionId: text("section_id").notNull(),
   lastHeartbeat: timestamp("last_heartbeat").notNull().default(new Date().toISOString()),
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
-}, (table) => ({
-  unq: unique().on(table.orderId, table.sectionId),
-}));
+}, (table) => {
+  return {};
+});
 
-export const workUnits = pgTable("work_units", {
+export const workUnits = sqliteTable("work_units", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   orderId: text("order_id").notNull().references(() => orders.id),
   pickupPoint: integer("pickup_point").notNull(),
@@ -174,18 +180,21 @@ export const workUnits = pgTable("work_units", {
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
 });
 
-export const exceptions = pgTable("exceptions", {
+export const exceptions = sqliteTable("exceptions", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   workUnitId: text("work_unit_id").references(() => workUnits.id),
   orderItemId: text("order_item_id").notNull().references(() => orderItems.id),
   type: text("type").notNull().$type<ExceptionType>(),
-  quantity: doublePrecision("quantity").notNull(),
+  quantity: real("quantity").notNull(),
   observation: text("observation"),
   reportedBy: text("reported_by").notNull().references(() => users.id),
+  authorizedBy: text("authorized_by").references(() => users.id),
+  authorizedByName: text("authorized_by_name"),
+  authorizedAt: timestamp("authorized_at"),
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
 });
 
-export const auditLogs = pgTable("audit_logs", {
+export const auditLogs = sqliteTable("audit_logs", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   userId: text("user_id").references(() => users.id),
   action: text("action").notNull(),
@@ -199,7 +208,7 @@ export const auditLogs = pgTable("audit_logs", {
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
 });
 
-export const sessions = pgTable("sessions", {
+export const sessions = sqliteTable("sessions", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   userId: text("user_id").notNull().references(() => users.id),
   token: text("token").notNull(),
@@ -211,7 +220,7 @@ export const sessions = pgTable("sessions", {
 export const manualQtyRuleTypeEnum = ["product_code", "barcode", "description_keyword", "manufacturer"] as const;
 export type ManualQtyRuleType = typeof manualQtyRuleTypeEnum[number];
 
-export const manualQtyRules = pgTable("manual_qty_rules", {
+export const manualQtyRules = sqliteTable("manual_qty_rules", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   ruleType: text("rule_type").notNull().$type<ManualQtyRuleType>(),
   value: text("value").notNull(),
@@ -220,6 +229,41 @@ export const manualQtyRules = pgTable("manual_qty_rules", {
   createdBy: text("created_by").references(() => users.id),
   createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
 });
+
+export const db2Mappings = sqliteTable("db2_mappings", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  dataset: text("dataset").notNull(),
+  version: integer("version").notNull().default(1),
+  isActive: boolean("is_active").notNull().default(false),
+  mappingJson: text("mapping_json", { mode: "json" }).$type<MappingField[]>().notNull(),
+  description: text("description"),
+  createdBy: text("created_by").references(() => users.id),
+  createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
+  updatedAt: timestamp("updated_at").notNull().default(new Date().toISOString()),
+});
+
+export interface MappingField {
+  appField: string;
+  type: "string" | "number" | "date" | "boolean";
+  required: boolean;
+  dbExpression: string;
+  cast?: string;
+  defaultValue?: string;
+}
+
+export interface DataContractField {
+  appField: string;
+  type: "string" | "number" | "date" | "boolean";
+  required: boolean;
+  description: string;
+  example: string;
+}
+
+export const datasetEnum = ["orders", "products", "order_items", "work_units"] as const;
+export type DatasetName = typeof datasetEnum[number];
+
+export type Db2Mapping = typeof db2Mappings.$inferSelect;
+export type InsertDb2Mapping = typeof db2Mappings.$inferInsert;
 
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
 export const insertRouteSchema = createInsertSchema(routes).omit({ id: true }).extend({ code: z.string().optional() });
@@ -257,41 +301,6 @@ export type InsertSectionGroup = typeof sectionGroups.$inferInsert;
 export type ManualQtyRule = typeof manualQtyRules.$inferSelect;
 export type InsertManualQtyRule = z.infer<typeof insertManualQtyRuleSchema>;
 
-
-export const db2Mappings = pgTable("db2_mappings", {
-  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
-  dataset: text("dataset").notNull(),
-  version: integer("version").notNull().default(1),
-  isActive: boolean("is_active").notNull().default(false),
-  mappingJson: jsonb("mapping_json").$type<MappingField[]>().notNull(),
-  description: text("description"),
-  createdBy: text("created_by").references(() => users.id),
-  createdAt: timestamp("created_at").notNull().default(new Date().toISOString()),
-  updatedAt: timestamp("updated_at").notNull().default(new Date().toISOString()),
-});
-
-export interface MappingField {
-  appField: string;
-  type: "string" | "number" | "date" | "boolean";
-  required: boolean;
-  dbExpression: string;
-  cast?: string;
-  defaultValue?: string;
-}
-
-export interface DataContractField {
-  appField: string;
-  type: "string" | "number" | "date" | "boolean";
-  required: boolean;
-  description: string;
-  example: string;
-}
-
-export const datasetEnum = ["orders", "products", "order_items", "work_units"] as const;
-export type DatasetName = typeof datasetEnum[number];
-
-export type Db2Mapping = typeof db2Mappings.$inferSelect;
-export type InsertDb2Mapping = typeof db2Mappings.$inferInsert;
 
 export const loginSchema = z.object({
   username: z.string().min(1, "Usuário é obrigatório"),

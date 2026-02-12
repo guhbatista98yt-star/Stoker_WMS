@@ -36,6 +36,7 @@ import {
     Pencil,
     Trash2,
     Save,
+    XCircle,
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { GradientHeader } from "@/components/ui/gradient-header";
@@ -43,6 +44,7 @@ import { SectionCard } from "@/components/ui/section-card";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Link } from "wouter";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth";
 
 
 type FlowStep = "initial" | "pickup-points" | "select-orders" | "sections" | "summary";
@@ -59,6 +61,7 @@ interface SectionGroup {
 export default function PickingListReport() {
     const { toast } = useToast();
     const queryClient = useQueryClient();
+    const { user } = useAuth();
 
     // Flow state
     const [currentStep, setCurrentStep] = useState<FlowStep>("initial");
@@ -93,7 +96,7 @@ export default function PickingListReport() {
     const { data: pickupPointsData } = useQuery({
         queryKey: ["/api/pickup-points"],
     });
-    const pickupPoints: number[] = (pickupPointsData as number[]) || [];
+    const pickupPoints: any[] = (pickupPointsData as any[]) || [];
 
     const { data: ordersData, refetch: refetchOrders, isFetching: isLoadingOrders } = useQuery({
         queryKey: ["/api/orders"],
@@ -105,7 +108,7 @@ export default function PickingListReport() {
         queryKey: ["/api/sections"],
         enabled: currentStep === "sections",
     });
-    const sections = (sectionsData as string[]) || [];
+    const sections = (sectionsData as any[]) || [];
 
     const { data: groupsData } = useQuery({
         queryKey: ["/api/sections/groups"],
@@ -192,6 +195,28 @@ export default function PickingListReport() {
         },
     });
 
+    const cancelLaunchMutation = useMutation({
+        mutationFn: async (orderIds: string[]) => {
+            const response = await apiRequest("POST", "/api/orders/cancel-launch", { orderIds });
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.details || data.error || "Erro ao cancelar lançamento");
+            }
+            return response.json();
+        },
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
+            toast({ title: "✅ Lançamento cancelado com sucesso!" });
+        },
+        onError: (error: Error) => {
+            toast({
+                title: "❌ Erro ao cancelar lançamento",
+                description: error.message,
+                variant: "destructive"
+            });
+        },
+    });
+
     const filteredOrders = orders.filter(order => {
         if (filterDateRange?.from) {
             const orderDate = new Date(order.createdAt);
@@ -223,11 +248,21 @@ export default function PickingListReport() {
         return true;
     });
 
+    // Helper para busca múltipla
+    const processMultipleOrderSearch = (searchValue: string, orderCode: string): boolean => {
+        if (!searchValue.trim()) return true;
+        if (searchValue.includes(',')) {
+            const terms = searchValue.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+            return terms.some(term => orderCode.toLowerCase().includes(term));
+        }
+        return orderCode.toLowerCase().includes(searchValue.toLowerCase());
+    };
+
     // Search filtered orders
     const displayedOrders = filteredOrders.filter(order => {
         if (orderSearchQuery) {
             const query = orderSearchQuery.toLowerCase();
-            const matchesId = order.erpOrderId?.toLowerCase().includes(query);
+            const matchesId = processMultipleOrderSearch(orderSearchQuery, order.erpOrderId || '');
             const matchesCustomer = order.customerName?.toLowerCase().includes(query);
             if (!matchesId && !matchesCustomer) return false;
         }
@@ -309,7 +344,9 @@ export default function PickingListReport() {
                 : sectionMode === "group" && selectedGroupId
                     ? (groups.find(g => g.id === selectedGroupId)?.sections || [])
                     : [];
-            const sectionFilterLabel = activeSections.length > 0 ? activeSections.join("; ") : "Todos";
+            const sectionFilterLabel = activeSections.length > 0
+                ? activeSections.map(sid => sections.find((s: any) => String(s.id) === sid)?.name || sid).join("; ")
+                : "Todos";
 
             const routeIds = [...new Set(reportOrders.map((o: any) => o.routeId).filter(Boolean))] as string[];
             const routeNames = routeIds.map((rid: string) => {
@@ -328,16 +365,28 @@ export default function PickingListReport() {
                 totalQty: number;
             }
 
-            const productMap = new Map<string, AggregatedProduct>();
+            interface ReportGroup {
+                section: string;
+                pickupPoint: number;
+                items: any[];
+            }
 
-            for (const order of reportOrders) {
-                const items = order.items || [];
-                for (const item of items) {
-                    if (activeSections.length > 0 && !activeSections.includes(item.section)) continue;
+            const reportData: ReportGroup[] = data.reportData || [];
 
+            let bodyHtml = "";
+            let grandTotal = 0;
+
+            for (const group of reportData) {
+                const sectionObj = sections.find((s: any) => String(s.id) === String(group.section));
+                const sectionName = sectionObj ? sectionObj.name : (group.section || "Sem Seção");
+                const pickupPoint = group.pickupPoint;
+
+                // Aggregate items by product code within this group
+                const productMap = new Map<string, AggregatedProduct>();
+
+                for (const item of group.items) {
                     const erpCode = item.product?.erpCode || item.productId || "";
-                    const section = item.section || "";
-                    const key = `${section}::${erpCode}`;
+                    const key = erpCode;
 
                     const existing = productMap.get(key);
                     if (existing) {
@@ -348,30 +397,21 @@ export default function PickingListReport() {
                             name: item.product?.name || "",
                             barcode: item.product?.barcode || "",
                             manufacturer: item.product?.manufacturer || "",
-                            section,
+                            section: sectionName,
                             totalQty: Number(item.quantity) || 0,
                         });
                     }
                 }
-            }
 
-            const allProducts = Array.from(productMap.values());
-            const sectionGroups = new Map<string, AggregatedProduct[]>();
-            for (const p of allProducts) {
-                const sectionName = p.section || "Sem Seção";
-                if (!sectionGroups.has(sectionName)) {
-                    sectionGroups.set(sectionName, []);
-                }
-                sectionGroups.get(sectionName)!.push(p);
-            }
+                const items = Array.from(productMap.values()).sort((a, b) => a.erpCode.localeCompare(b.erpCode));
 
-            let bodyHtml = "";
-            let grandTotal = 0;
+                const ppInfo = pickupPoints.find((p: any) => p.id === pickupPoint);
+                const pickupPointName = ppInfo ? ppInfo.name : `Ponto ${pickupPoint}`;
 
-            const sortedSections = Array.from(sectionGroups.keys()).sort();
-            for (const sectionName of sortedSections) {
-                const items = sectionGroups.get(sectionName)!.sort((a, b) => a.erpCode.localeCompare(b.erpCode));
-                bodyHtml += `<tr class="section-row"><td colspan="6"><strong>Seção:</strong> &nbsp;&nbsp;&nbsp;&nbsp;<strong>${sectionName.toUpperCase()}</strong></td></tr>`;
+                // Section Header - Left aligned
+                bodyHtml += `<tr class="section-row"><td colspan="6" style="text-align:left;">
+                    <strong>Seção:</strong> ${sectionName.toUpperCase()}
+                </td></tr>`;
 
                 for (const item of items) {
                     const qtyFormatted = item.totalQty % 1 === 0 ? item.totalQty.toFixed(0) + ",00" : item.totalQty.toFixed(2).replace(".", ",");
@@ -384,39 +424,35 @@ export default function PickingListReport() {
                         <td style="text-align:right; font-weight:bold">${qtyFormatted}</td>
                     </tr>`;
                 }
-
-                bodyHtml += `<tr class="count-row"><td colspan="6" style="padding-left:30px"><strong>${items.length}</strong> ite${items.length === 1 ? 'm' : 'ns'}</td></tr>`;
                 grandTotal += items.length;
             }
-
-            bodyHtml += `<tr class="total-row final"><td colspan="5"><strong>Total</strong></td><td style="text-align:right"><strong>${grandTotal}</strong></td></tr>`;
 
             const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>${titlePrefix}Romaneio de Separação</title>
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: Arial, Helvetica, sans-serif; margin: 20px 25px; font-size: 12px; color: #000; line-height: 1.4; }
-    .header { text-align: center; margin-bottom: 10px; }
-    .header h1 { font-size: 20px; font-weight: bold; margin: 0 0 8px 0; letter-spacing: 0.5px; }
-    .header .params { font-size: 11px; color: #222; line-height: 1.6; }
+    body { font-family: Arial, Helvetica, sans-serif; margin: 12px 20px; font-size: 11px; color: #000; line-height: 1.2; }
+    .header { text-align: center; margin-bottom: 6px; }
+    .header h1 { font-size: 16px; font-weight: bold; margin: 0 0 4px 0; letter-spacing: 0.3px; }
+    .header .params { font-size: 10px; color: #222; line-height: 1.3; }
     .header .params span.label { color: #555; }
-    .sub-header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #000; padding-bottom: 4px; margin-bottom: 8px; font-size: 11px; }
+    .sub-header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 1px solid #000; padding-bottom: 2px; margin-bottom: 4px; font-size: 10px; }
     .sub-header .left { font-style: italic; text-decoration: underline; }
-    .sub-header .right { text-align: right; font-size: 10px; line-height: 1.4; }
-    table { width: 100%; border-collapse: collapse; margin-top: 4px; }
-    th { border-top: 2px solid #000; border-bottom: 2px solid #000; padding: 6px 8px; text-align: left; font-size: 12px; font-weight: bold; background: #f5f5f5; }
+    .sub-header .right { text-align: right; font-size: 9px; line-height: 1.2; }
+    table { width: 100%; border-collapse: collapse; margin-top: 2px; }
+    th { border-top: 1px solid #000; border-bottom: 1px solid #000; padding: 3px 6px; text-align: left; font-size: 11px; font-weight: bold; background: #f5f5f5; }
     th:last-child { text-align: right; }
-    td { padding: 4px 8px; font-size: 12px; border: none; vertical-align: middle; }
+    td { padding: 2px 6px; font-size: 11px; border: none; vertical-align: middle; }
     td:last-child { text-align: right; }
     td:first-child { font-weight: 500; }
     tr:nth-child(even):not(.section-row):not(.count-row):not(.total-row) { background: #fafafa; }
-    .section-row td { padding-top: 14px; padding-bottom: 4px; border-bottom: 1px solid #ccc; font-size: 13px; background: transparent !important; }
-    .count-row td { padding-top: 4px; padding-bottom: 2px; font-size: 11px; color: #444; background: transparent !important; }
-    .total-row td { padding-top: 6px; font-size: 13px; background: transparent !important; }
-    .total-row.final td { border-top: 2px solid #000; padding-top: 8px; font-size: 14px; }
+    .section-row td { padding-top: 8px; padding-bottom: 2px; border-bottom: 1px solid #ccc; font-size: 12px; background: transparent !important; }
+    .count-row td { padding-top: 2px; padding-bottom: 1px; font-size: 10px; color: #444; background: transparent !important; }
+    .total-row td { padding-top: 4px; font-size: 12px; background: transparent !important; }
+    .total-row.final td { border-top: 1px solid #000; padding-top: 6px; font-size: 13px; }
     @media print {
-        body { margin: 8mm 10mm; }
-        @page { size: landscape; margin: 8mm; }
+        body { margin: 6mm 8mm; }
+        @page { size: landscape; margin: 6mm; }
         tr { page-break-inside: avoid; }
         .section-row { page-break-after: avoid; }
     }
@@ -424,13 +460,12 @@ export default function PickingListReport() {
 <div class="header">
     <h1>${titlePrefix}Romaneio de Separação</h1>
     <div class="params">
-        <span class="label">Ponto de Retirada:</span> ${ppLabel}<br/>
         <span class="label">Pedidos:</span> ${orderIdsLabel}<br/>
         <span class="label">Local de Estoque:</span> ${sectionFilterLabel}
     </div>
 </div>
 <div class="sub-header">
-    <span class="left">Logística/Movimento de Entrega</span>
+    <span class="left"></span>
     <span class="right">Versão 1<br/>${now}</span>
 </div>
 <table>
@@ -659,16 +694,16 @@ export default function PickingListReport() {
                                 {pickupPoints.length === 0 && (
                                     <p className="text-muted-foreground text-sm col-span-2">Nenhum ponto de retirada encontrado</p>
                                 )}
-                                {pickupPoints.map(pointId => (
-                                    <div key={pointId} className="flex items-center space-x-2 p-3 border rounded hover:bg-muted/50 transition-colors">
+                                {pickupPoints.map((pp: any) => (
+                                    <div key={pp.id} className="flex items-center space-x-2 p-3 border rounded hover:bg-muted/50 transition-colors">
                                         <Checkbox
-                                            id={`point-${pointId}`}
-                                            checked={selectedPickupPoints.includes(pointId)}
-                                            onCheckedChange={() => togglePickupPoint(pointId)}
+                                            id={`point-${pp.id}`}
+                                            checked={selectedPickupPoints.includes(pp.id)}
+                                            onCheckedChange={() => togglePickupPoint(pp.id)}
                                             disabled={selectAllPickupPoints}
                                         />
-                                        <Label htmlFor={`point-${pointId}`} className="cursor-pointer font-medium text-sm w-full py-1">
-                                            Ponto {pointId}
+                                        <Label htmlFor={`point-${pp.id}`} className="cursor-pointer font-medium text-sm w-full py-1">
+                                            {pp.name}
                                         </Label>
                                     </div>
                                 ))}
@@ -730,7 +765,7 @@ export default function PickingListReport() {
                             <div className="relative">
                                 <SearchIcon className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
                                 <Input
-                                    placeholder="Filtrar na lista (Cliente, ID)..."
+                                    placeholder="Filtrar (Pedido, Cliente) - separe por vírgula"
                                     value={orderSearchQuery}
                                     onChange={(e) => setOrderSearchQuery(e.target.value)}
                                     className="pl-8"
@@ -771,8 +806,12 @@ export default function PickingListReport() {
                                                 </TableHead>
                                                 <TableHead>Pedido</TableHead>
                                                 <TableHead>Cliente</TableHead>
-                                                <TableHead className="text-center">Prod.</TableHead>
-                                                <TableHead className="text-center">Status</TableHead>
+                                                <TableHead className="w-16 text-center">Prod.</TableHead>
+                                                <TableHead className="text-right">Valor</TableHead>
+                                                <TableHead className="text-center">Status Fin.</TableHead>
+                                                {user && ["administrador", "supervisor"].includes(user.role) && (
+                                                    <TableHead className="text-center w-32">Ações</TableHead>
+                                                )}
                                             </TableRow>
                                         </TableHeader>
                                         <TableBody>
@@ -803,11 +842,32 @@ export default function PickingListReport() {
                                                         <TableCell className="text-center">
                                                             <Badge variant="outline">{order.itemCount || 0}</Badge>
                                                         </TableCell>
+                                                        <TableCell className="text-right font-medium">
+                                                            {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(order.totalValue || 0))}
+                                                        </TableCell>
                                                         <TableCell className="text-center">
-                                                            <Badge variant={order.financialStatus === 'Aprovado' ? 'default' : 'secondary'} className="shadow-none">
-                                                                {order.financialStatus || 'Pendente'}
+                                                            <Badge variant={order.financialStatus === 'faturado' ? 'default' : 'secondary'} className={`shadow-none capitalize ${order.financialStatus === 'faturado' ? 'bg-green-600 hover:bg-green-700' : ''}`}>
+                                                                {order.financialStatus === 'faturado' ? 'Liberado' : (order.financialStatus || 'Pendente')}
                                                             </Badge>
                                                         </TableCell>
+                                                        {user && ["administrador", "supervisor"].includes(user.role) && (
+                                                            <TableCell onClick={(e) => e.stopPropagation()} className="text-center">
+                                                                {order.isLaunched ? (
+                                                                    <Button
+                                                                        variant="ghost"
+                                                                        size="sm"
+                                                                        className="h-8 px-2 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                                                        onClick={() => cancelLaunchMutation.mutate([order.id])}
+                                                                        disabled={cancelLaunchMutation.isPending}
+                                                                        title="Cancelar Lançamento"
+                                                                    >
+                                                                        <XCircle className="h-4 w-4" />
+                                                                    </Button>
+                                                                ) : (
+                                                                    <span className="text-muted-foreground text-xs">-</span>
+                                                                )}
+                                                            </TableCell>
+                                                        )}
                                                     </TableRow>
                                                 ))
                                             )}
@@ -869,11 +929,11 @@ export default function PickingListReport() {
                                     </div>
                                     <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                                         {sections.map((section: any) => (
-                                            <div key={section.id} className="flex items-center space-x-2 p-3 rounded border bg-card hover:bg-accent transition-colors cursor-pointer" onClick={() => toggleSection(section.name)}>
+                                            <div key={section.id} className="flex items-center space-x-2 p-3 rounded border bg-card hover:bg-accent transition-colors cursor-pointer" onClick={() => toggleSection(String(section.id))}>
                                                 <Checkbox
                                                     id={`section-${section.id}`}
-                                                    checked={selectedSections.includes(section.name)}
-                                                    onCheckedChange={() => toggleSection(section.name)}
+                                                    checked={selectedSections.includes(String(section.id))}
+                                                    onCheckedChange={() => toggleSection(String(section.id))}
                                                     className="pointer-events-none"
                                                 />
                                                 <Label htmlFor={`section-${section.id}`} className="cursor-pointer flex-1 text-sm line-clamp-1 py-1" title={section.name}>
@@ -926,22 +986,25 @@ export default function PickingListReport() {
                                                     <Label>Selecione as Seções do Grupo</Label>
                                                     <div className="border rounded-md bg-background max-h-[250px] overflow-auto p-4 grid grid-cols-2 gap-3">
                                                         {sections.map(section => (
-                                                            <div key={section} className="flex items-center space-x-3 p-3 border rounded-md hover:bg-accent transition-colors cursor-pointer" onClick={() => {
+                                                            <div key={section.id} className="flex items-center space-x-3 p-3 border rounded-md hover:bg-accent transition-colors cursor-pointer" onClick={() => {
                                                                 setNewGroupSections(prev =>
-                                                                    prev.includes(section)
-                                                                        ? prev.filter(s => s !== section)
-                                                                        : [...prev, section]
+                                                                    prev.includes(String(section.id))
+                                                                        ? prev.filter(s => s !== String(section.id))
+                                                                        : [...prev, String(section.id)]
                                                                 );
                                                             }}>
                                                                 <Checkbox
-                                                                    id={`inline-section-${section}`}
-                                                                    checked={newGroupSections.includes(section)}
+                                                                    id={`inline-section-${section.id}`}
+                                                                    checked={newGroupSections.includes(String(section.id))}
                                                                     onCheckedChange={() => {
                                                                         // Handled by parent div click
                                                                     }}
                                                                     className="pointer-events-none" // Pass click to parent
                                                                 />
-                                                                <Label htmlFor={`inline-section-${section}`} className="text-sm cursor-pointer flex-1 py-1">{section}</Label>
+                                                                <Label htmlFor={`inline-section-${section.id}`} className="text-sm cursor-pointer flex-1 py-1">
+                                                                    <span className="font-mono font-bold mr-1">{section.id}</span>
+                                                                    {section.name}
+                                                                </Label>
                                                             </div>
                                                         ))}
                                                     </div>

@@ -33,6 +33,7 @@ import {
 import type { Order } from "@shared/schema";
 import { useSSE } from "@/hooks/use-sse";
 import { useCallback } from "react";
+import { format } from "date-fns";
 
 export default function SupervisorDashboard() {
   const { user, logout } = useAuth();
@@ -231,10 +232,10 @@ export default function SupervisorDashboard() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Pedido</TableHead>
-                    <TableHead>Movimento</TableHead>
+                    <TableHead>Data/Hora</TableHead>
                     <TableHead>Cliente</TableHead>
                     <TableHead>Valor</TableHead>
-                    <TableHead>Status</TableHead>
+                    <TableHead>Status Financeiro</TableHead>
                     <TableHead>Prioridade</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -245,7 +246,7 @@ export default function SupervisorDashboard() {
                         {order.erpOrderId}
                       </TableCell>
                       <TableCell>
-                        {order.createdAt ? new Date(order.createdAt).toLocaleDateString('pt-BR') : '-'}
+                        {order.createdAt ? format(new Date(order.createdAt), "dd/MM/yyyy HH:mm") : '-'}
                       </TableCell>
                       <TableCell>{order.customerName}</TableCell>
                       <TableCell>
@@ -254,7 +255,10 @@ export default function SupervisorDashboard() {
                         })}
                       </TableCell>
                       <TableCell>
-                        <StatusBadge status={order.status} />
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                          ${order.financialStatus === 'faturado' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                          {order.financialStatus === 'faturado' ? 'Liberado' : order.financialStatus}
+                        </span>
                       </TableCell>
                       <TableCell>
                         {order.priority > 0 ? (

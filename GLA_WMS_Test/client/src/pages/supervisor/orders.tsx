@@ -48,6 +48,7 @@ import {
   Send,
   Eye,
   SlidersHorizontal,
+  X,
 } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { OrderDetailsDialog } from "@/components/orders/order-details-dialog";
@@ -138,7 +139,6 @@ export default function OrdersPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ordersQueryKey });
-      setSelectedOrders([]);
       setShowRouteDialog(false);
       toast({ title: "Rota atribuída", description: "Pedidos atualizados." });
     },
@@ -185,14 +185,41 @@ export default function OrdersPage() {
     }
   });
 
+  const cancelLaunchMutation = useMutation({
+    mutationFn: async ({ orderIds }: { orderIds: string[] }) => {
+      const res = await apiRequest("POST", "/api/orders/cancel-launch", { orderIds });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.details || err.error || "Erro ao cancelar lançamento");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ordersQueryKey });
+      setSelectedOrders([]);
+      toast({ title: "Sucesso", description: "Lançamento cancelado com sucesso." });
+    },
+    onError: (e: Error) => toast({ title: "Erro", description: e.message, variant: "destructive" })
+  });
+
+
+  // Helper para busca múltipla por vírgula
+  const processMultipleOrderSearch = (searchValue: string, orderCode: string): boolean => {
+    if (!searchValue.trim()) return true;
+    if (searchValue.includes(',')) {
+      const terms = searchValue.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+      return terms.some(term => orderCode.toLowerCase().includes(term));
+    }
+    return orderCode.toLowerCase().includes(searchValue.toLowerCase());
+  };
 
   // --- FILTERING LOGIC ---
   const filteredOrders = useMemo(() => {
     if (!orders) return [];
 
     return orders.filter((order) => {
-      // 1. Search (Exact or Partial Order ID)
-      if (searchOrderId && !order.erpOrderId.toLowerCase().includes(searchOrderId.toLowerCase())) {
+      // 1. Search (Multiple Order IDs with comma)
+      if (searchOrderId && !processMultipleOrderSearch(searchOrderId, order.erpOrderId)) {
         return false;
       }
 
@@ -275,6 +302,19 @@ export default function OrdersPage() {
     assignRouteMutation.mutate({ orderIds: selectedOrders, routeId: selectedRoute });
   };
 
+  // Check if there are launched orders eligible for cancellation
+  const selectedLaunchedOrders = useMemo(() => {
+    if (!orders || selectedOrders.length === 0) return [];
+    const allowedStatuses = ["pendente", "em_separacao", "separado"];
+    return orders.filter(o =>
+      selectedOrders.includes(o.id) &&
+      o.isLaunched &&
+      allowedStatuses.includes(o.status)
+    );
+  }, [orders, selectedOrders]);
+
+  const hasLaunchedOrdersToCancel = selectedLaunchedOrders.length > 0;
+
   const statusOptions = [
     { value: 'pendente', label: 'Pendente a Separar' },
     { value: 'em_separacao', label: 'Em Separação' },
@@ -309,7 +349,7 @@ export default function OrdersPage() {
               <div className="relative">
                 <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                 <Input
-                  placeholder="Nº Pedido..."
+                  placeholder="Nº Pedido (separe múltiplos por vírgula)"
                   value={searchOrderId}
                   onChange={e => setSearchOrderId(e.target.value)}
                   className="pl-9"
@@ -425,6 +465,18 @@ export default function OrdersPage() {
             <Button size="sm" variant="ghost" onClick={() => setPriorityMutation.mutate({ orderIds: selectedOrders, priority: 1 })}>
               <AlertTriangle className="h-4 w-4 mr-2" /> Priorizar
             </Button>
+
+            {/* Cancel Launch Button - Only show for launched orders with allowed status */}
+            {hasLaunchedOrdersToCancel && (
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={() => cancelLaunchMutation.mutate({ orderIds: selectedLaunchedOrders.map(o => o.id) })}
+                disabled={cancelLaunchMutation.isPending}
+              >
+                <X className="h-4 w-4 mr-2" /> Cancelar Lançamento
+              </Button>
+            )}
           </div>
         )}
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sincronizador DB2 → SQLite para Sales Analytics Dashboard
+Sincronizador DB2 -> SQLite para Sales Analytics Dashboard
 Coleta dados do DB2 e salva no database.db local.
 Modo INCREMENTAL: usa CHAVE única para evitar duplicatas.
 
@@ -19,15 +19,13 @@ import sqlite3
 import argparse
 import subprocess
 import threading
+import platform
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
+import json
 
-# === MODIFICATION: pyodbc optional ===
-try:
-    import pyodbc
-except ImportError:
-    print("AVISO: pyodbc não instalado. Funcionalidades de DB2 estarão indisponíveis.")
-    pyodbc = None
+# === MODIFICATION: pyodbc mandatory ===
+import pyodbc
 # =====================================
 
 # === PostgreSQL mapping support ===
@@ -54,28 +52,21 @@ DATABASE_PATH = os.path.join(PROJECT_ROOT, "database.db")
 
 
 def log(msg: str):
-    """Log com timestamp."""
+    """Log com timestamp completo YYYY-MM-DD HH:MM:SS."""
     if QUIET:
         return
+    # Formato solicitado: [2026-02-08 21:30:13] Msg
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
 # ... (skipping to main)
 
-def main():
+def main_unused():
     global QUIET
-    parser = argparse.ArgumentParser(
-        description="Sincronizador DB2 -> SQLite",
-        epilog="""
-Exemplos:
-  python sync_db2.py --serve          # Sync + Servidor (Loop padrão 5 min)
-  python sync_db2.py --loop 600       # Apenas Sync (Loop 10 min)
-  python sync_db2.py --quiet          # Executa sem output
-        """
-    )
+    parser = argparse.ArgumentParser(description="Sincronizador DB2 -> SQLite")
     parser.add_argument("--desde", type=str, metavar="YYYY-MM-DD",
-                        help="Ignorado nesta versão (Janela fixa 31 dias)")
+                        help="Ignorado (Janela fixa 31 dias)")
     parser.add_argument("--loop", type=int, metavar="SEGUNDOS",
-                        help="Intervalo do loop (padrão 300s = 5min)")
+                        help="Intervalo do loop")
     parser.add_argument("--serve", action="store_true",
                         help="Inicia o servidor web após sync")
     parser.add_argument("--quiet", action="store_true",
@@ -87,21 +78,44 @@ Exemplos:
         QUIET = True
     
     # 1. Sincronização Inicial (Bloqueante)
+    # Ex: [2026-02-08 21:30:13] Sync iniciado | modo=serve | SO=Windows
+    modo_str = "serve" if args.serve else ("loop" if args.loop else "once")
     if not QUIET:
-        log("Executando sincronização inicial...")
+        log(f"Sync iniciado | modo={modo_str} | SO={platform.system()}")
+
+    # Garantir que tabelas existam
+    inicializar_sqlite()
     
     sucesso = sincronizar(data_inicial=args.desde)
     
     # 2. Configurar Loop (Thread se Serve, Main se Loop-Only)
+    if args.loop:
+        intervalo = args.loop
+        
+        def loop_sync_internal(): 
+            while True:
+                time.sleep(intervalo)
+                sincronizar()
+        
+        if args.serve:
+            t = threading.Thread(target=loop_sync_internal, daemon=True)
+            t.start()
+        else:
+            try:
+                loop_sync_internal()
+            except KeyboardInterrupt:
+                pass
 
+    # 3. Servidor Web
+    if args.serve:
+        iniciar_servidor()
 
 
 def conectar_db2():
     """Conecta ao DB2."""
-    if not pyodbc:
-        raise ImportError("pyodbc não instalado")
-    log("Conectando ao DB2...")
-    return pyodbc.connect(STRING_CONEXAO_DB2, timeout=30)
+    conn = pyodbc.connect(STRING_CONEXAO_DB2, timeout=30)
+    log("DB2 OK | conexão estabelecida")
+    return conn
 
 
 def executar_sql_db2(conn, query: str) -> List[Dict[str, Any]]:
@@ -133,6 +147,20 @@ def formatar_data(valor) -> str:
     return str(valor)[:10]
 
 
+def formatar_datetime(valor) -> str:
+    """Formata datetime para ISO 8601 completo (YYYY-MM-DDTHH:MM:SS)."""
+    if valor is None:
+        return ""
+    if hasattr(valor, 'strftime'):
+        return valor.strftime('%Y-%m-%dT%H:%M:%S')
+    # Se vier como string "2025-02-08 21:50:00", converter para formato ISO
+    valor_str = str(valor)
+    if ' ' in valor_str:
+        # Substituir espaço por 'T' para formato ISO
+        return valor_str.replace(' ', 'T')[:19]
+    return valor_str[:19]  # Retorna até segundos
+
+
 def formatar_hora(valor) -> str:
     """Formata hora para HH:MM:SS."""
     if valor is None:
@@ -145,290 +173,360 @@ def formatar_hora(valor) -> str:
 def inicializar_sqlite():
     """Inicializa o banco SQLite com o schema."""
     log(f"Inicializando SQLite em {DATABASE_PATH}...")
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
     
-
-    
-    # Nova tabela baseada em ORCAMENTO (Window 31 dias)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cache_orcamentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            CHAVE TEXT UNIQUE NOT NULL,
-            IDEMPRESA INTEGER,
-            IDORCAMENTO INTEGER,
-            IDPRODUTO TEXT,
-            IDSUBPRODUTO TEXT,
-            NUMSEQUENCIA INTEGER,
-            QTDPRODUTO REAL,
-            UNIDADE TEXT,
-            FABRICANTE TEXT,
-            VALUNITBRUTO REAL,
-            VALTOTLIQUIDO REAL,
-            DESCRRESPRODUTO TEXT,
-            IDVENDEDOR TEXT,
-            IDLOCALRETIRADA INTEGER,
-            IDSECAO INTEGER,
-            DESCRSECAO TEXT,
-            TIPOENTREGA TEXT,
-            NOMEVENDEDOR TEXT,
-            TIPOENTREGA_DESCR TEXT,
-            LOCALRETESTOQUE TEXT,
-            FLAGCANCELADO TEXT,
-            IDCLIFOR TEXT,
-            DESCLIENTE TEXT,
-            DTMOVIMENTO TEXT,
-            IDRECEBIMENTO TEXT,
-            DESCRRECEBIMENTO TEXT,
-            FLAGPRENOTAPAGA TEXT,
-            CODBARRAS TEXT,
-            CODBARRAS_CAIXA TEXT,
-            sync_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    
-    cursor.execute("DROP TABLE IF EXISTS cache_vendas_pendentes")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cache_vendas_pendentes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            IDEMPRESA INTEGER NOT NULL,
-            CODIGO_VENDEDOR TEXT NOT NULL,
-            NOME_VENDEDOR TEXT NOT NULL,
-            VALOR_TOTAL REAL NOT NULL,
-            sync_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    cursor.execute("DROP TABLE IF EXISTS cache_tubos_conexoes")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cache_tubos_conexoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            IDEMPRESA INTEGER NOT NULL,
-            DT_MOVIMENTO TEXT NOT NULL,
-            IDVENDEDOR TEXT NOT NULL,
-            NOME_VENDEDOR TEXT NOT NULL,
-            VALOR_LIQUIDO REAL NOT NULL,
-            TIPO_PRODUTO TEXT NOT NULL,
-            sync_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS companies (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            cnpj TEXT UNIQUE NOT NULL
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS goals (
-            id TEXT PRIMARY KEY,
-            salesperson_id TEXT NOT NULL,
-            company_id TEXT NOT NULL,
-            type TEXT NOT NULL,
-            target_value REAL NOT NULL,
-            month INTEGER NOT NULL,
-            year INTEGER NOT NULL
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS alerts (
-            id TEXT PRIMARY KEY,
-            company_id TEXT NOT NULL,
-            type TEXT NOT NULL,
-            title TEXT NOT NULL,
-            message TEXT NOT NULL,
-            salesperson_id TEXT,
-            severity TEXT DEFAULT 'warning',
-            is_read INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Índices
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_orc_dt ON cache_orcamentos(DTMOVIMENTO)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_orc_vend ON cache_orcamentos(IDVENDEDOR)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_orc_chave ON cache_orcamentos(CHAVE)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cache_pendentes_vendedor ON cache_vendas_pendentes(CODIGO_VENDEDOR)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cache_tubos_vendedor ON cache_tubos_conexoes(IDVENDEDOR)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cache_tubos_type ON cache_tubos_conexoes(TIPO_PRODUTO)")
-    
-    # Create Users Table if not exists
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            name TEXT NOT NULL,
-            role TEXT NOT NULL,
-            sections TEXT,
-            active INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL REFERENCES users(id),
-            token TEXT UNIQUE NOT NULL,
-            session_key TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sections (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL
-        )
-    """)
-
-    # Create APPLICATION Tables (Orders, Products, Items, WorkUnits)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id TEXT PRIMARY KEY,
-            erp_code TEXT UNIQUE NOT NULL,
-            barcode TEXT,
-            name TEXT NOT NULL,
-            section TEXT NOT NULL,
-            pickup_point INTEGER NOT NULL,
-            unit TEXT DEFAULT 'UN' NOT NULL,
-            manufacturer TEXT,
-            price REAL DEFAULT 0 NOT NULL,
-            stock_qty REAL DEFAULT 0 NOT NULL,
-            erp_updated_at TEXT
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS routes (
-            id TEXT PRIMARY KEY,
-            code TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            description TEXT,
-            active INTEGER DEFAULT 1
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id TEXT PRIMARY KEY,
-            erp_order_id TEXT UNIQUE NOT NULL,
-            customer_name TEXT NOT NULL,
-            customer_code TEXT,
-            total_value REAL DEFAULT 0 NOT NULL,
-            observation TEXT,
-            status TEXT DEFAULT 'pendente' NOT NULL,
-            financial_status TEXT DEFAULT 'pendente' NOT NULL,
-            priority INTEGER DEFAULT 0 NOT NULL,
-            is_launched INTEGER DEFAULT 0 NOT NULL,
-            route_id TEXT REFERENCES routes(id),
-            separation_code TEXT UNIQUE,
-            pickup_points TEXT,
-            erp_updated_at TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS order_items (
-            id TEXT PRIMARY KEY,
-            order_id TEXT NOT NULL REFERENCES orders(id),
-            product_id TEXT NOT NULL REFERENCES products(id),
-            quantity REAL NOT NULL,
-            separated_qty REAL DEFAULT 0 NOT NULL,
-            checked_qty REAL DEFAULT 0 NOT NULL,
-            status TEXT DEFAULT 'pendente' NOT NULL,
-            pickup_point INTEGER NOT NULL,
-            section TEXT NOT NULL
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS work_units (
-            id TEXT PRIMARY KEY,
-            order_id TEXT REFERENCES orders(id),
-            status TEXT NOT NULL,
-            type TEXT NOT NULL,
-            pickup_point INTEGER,
-            section TEXT,
-            assigned_user_id TEXT REFERENCES users(id),
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-            completed_at TEXT,
-            locked_by TEXT REFERENCES users(id),
-            locked_at TEXT,
-            lock_expires_at TEXT,
-            cart_qr_code TEXT,
-            pallet_qr_code TEXT,
-            started_at TEXT
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS exceptions (
-            id TEXT PRIMARY KEY,
-            work_unit_id TEXT NOT NULL REFERENCES work_units(id),
-            order_item_id TEXT NOT NULL REFERENCES order_items(id),
-            type TEXT NOT NULL,
-            quantity REAL NOT NULL,
-            observation TEXT,
-            reported_by TEXT NOT NULL REFERENCES users(id),
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id TEXT PRIMARY KEY,
-            user_id TEXT REFERENCES users(id),
-            action TEXT NOT NULL,
-            entity_type TEXT NOT NULL,
-            entity_id TEXT,
-            details TEXT,
-            previous_value TEXT,
-            new_value TEXT,
-            ip_address TEXT,
-            user_agent TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
-        )
-    """)
-
-    # Ensure Admin/Supervisor User
     try:
-        # PWD Hash for '1234'
-        pwd_hash = "$2b$10$JLabii4Bj.OxF1DMhJ48V.pB5EKzS0PmA645Bm46pIiiAJv5ls6OO"
+        conn = sqlite3.connect(DATABASE_PATH, timeout=10.0)
+        cursor = conn.cursor()
         
-        # 1. Admin
-        cursor.execute("INSERT OR IGNORE INTO users (id, username, password, name, role) VALUES (?, ?, ?, ?, ?)", 
-                       (str(uuid.uuid4()), 'admin', pwd_hash, 'Administrador', 'supervisor'))
+        # Enable WAL mode and set busy timeout for concurrent access
+        cursor.execute("PRAGMA journal_mode = WAL")
+        cursor.execute("PRAGMA busy_timeout = 5000")
+        conn.commit()
+        
+        # 1. Cache Orcamentos
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS cache_orcamentos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    CHAVE TEXT UNIQUE NOT NULL,
+                    IDEMPRESA INTEGER,
+                    IDORCAMENTO INTEGER,
+                    IDPRODUTO TEXT,
+                    IDSUBPRODUTO TEXT,
+                    NUMSEQUENCIA INTEGER,
+                    QTDPRODUTO REAL,
+                    UNIDADE TEXT,
+                    FABRICANTE TEXT,
+                    VALUNITBRUTO REAL,
+                    VALTOTLIQUIDO REAL,
+                    DESCRRESPRODUTO TEXT,
+                    IDVENDEDOR TEXT,
+                    IDLOCALRETIRADA INTEGER,
+                    IDSECAO INTEGER,
+                    DESCRSECAO TEXT,
+                    TIPOENTREGA TEXT,
+                    NOMEVENDEDOR TEXT,
+                    TIPOENTREGA_DESCR TEXT,
+                    LOCALRETESTOQUE TEXT,
+                    FLAGCANCELADO TEXT,
+                    IDCLIFOR TEXT,
+                    DESCLIENTE TEXT,
+                    DTMOVIMENTO TEXT,
+                    IDRECEBIMENTO TEXT,
+                    DESCRRECEBIMENTO TEXT,
+                    FLAGPRENOTAPAGA TEXT,
+                    CODBARRAS TEXT,
+                    CODBARRAS_CAIXA TEXT,
+                    sync_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+        except Exception as e:
+            log(f"Erro ao criar cache_orcamentos: {e}")
 
-        # 2. Gustavo (Separador)
-        cursor.execute("INSERT OR IGNORE INTO users (id, username, password, name, role) VALUES (?, ?, ?, ?, ?)", 
-                       (str(uuid.uuid4()), 'gustavo', pwd_hash, 'Gustavo Separador', 'separacao'))
+        # 2. Remover tabelas antigas
+        try:
+            cursor.execute("DROP TABLE IF EXISTS cache_vendas_pendentes")
+            cursor.execute("DROP TABLE IF EXISTS cache_tubos_conexoes")
+            conn.commit()
+        except Exception as e:
+            log(f"Erro ao limpar tabelas antigas: {e}")
 
-        log("Usuários admin e gustavo verificados/criados.")
+        # 3. Companies & Goals & Alerts & Pickup Points
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS pickup_points (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    active INTEGER DEFAULT 1
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS companies (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    cnpj TEXT UNIQUE NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS goals (
+                    id TEXT PRIMARY KEY,
+                    salesperson_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    target_value REAL NOT NULL,
+                    month INTEGER NOT NULL,
+                    year INTEGER NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id TEXT PRIMARY KEY,
+                    company_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    salesperson_id TEXT,
+                    severity TEXT DEFAULT 'warning',
+                    is_read INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+        except Exception as e:
+            log(f"Erro ao criar tabelas comp/goals/alerts: {e}")
+            
+        # 4. Indices
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_orc_dt ON cache_orcamentos(DTMOVIMENTO)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_orc_vend ON cache_orcamentos(IDVENDEDOR)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_orc_chave ON cache_orcamentos(CHAVE)")
+            conn.commit()
+        except Exception as e:
+            log(f"Erro ao criar indices: {e}")
+
+        # 5. Users
+        try:
+            # Check if settings column exists if table exists
+            cursor.execute("PRAGMA table_info(users)")
+            columns = [info[1] for info in cursor.fetchall()]
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    sections TEXT,
+                    settings TEXT,
+                    active INTEGER DEFAULT 1,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            if 'settings' not in columns and 'users' in [t[0] for t in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")]:
+                 # Only try to alter if table exists but column doesn't
+                 try:
+                     cursor.execute("ALTER TABLE users ADD COLUMN settings TEXT")
+                 except:
+                     pass
+            conn.commit()
+        except Exception as e:
+            log(f"Erro ao criar users: {e}")
+            
+        # 6. Sections
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sections (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL
+                )
+            """)
+            conn.commit()
+        except Exception as e:
+            log(f"Erro ao criar sections: {e}")
+            
+        # 7. App Tables
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS products (
+                    id TEXT PRIMARY KEY,
+                    erp_code TEXT UNIQUE NOT NULL,
+                    barcode TEXT,
+                    box_barcode TEXT,
+                    name TEXT NOT NULL,
+                    section TEXT NOT NULL,
+                    pickup_point INTEGER NOT NULL,
+                    unit TEXT DEFAULT 'UN' NOT NULL,
+                    manufacturer TEXT,
+                    price REAL DEFAULT 0 NOT NULL,
+                    stock_qty REAL DEFAULT 0 NOT NULL,
+                    erp_updated_at TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS routes (
+                    id TEXT PRIMARY KEY,
+                    code TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    active INTEGER DEFAULT 1,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    id TEXT PRIMARY KEY,
+                    erp_order_id TEXT UNIQUE NOT NULL,
+                    customer_name TEXT NOT NULL,
+                    customer_code TEXT,
+                    total_value REAL DEFAULT 0 NOT NULL,
+                    observation TEXT,
+                    status TEXT DEFAULT 'pendente' NOT NULL,
+                    financial_status TEXT DEFAULT 'pendente' NOT NULL,
+                    priority INTEGER DEFAULT 0 NOT NULL,
+                    is_launched INTEGER DEFAULT 0 NOT NULL,
+                    route_id TEXT REFERENCES routes(id),
+                    separation_code TEXT UNIQUE,
+                    pickup_points TEXT,
+                    erp_updated_at TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS order_items (
+                    id TEXT PRIMARY KEY,
+                    order_id TEXT NOT NULL REFERENCES orders(id),
+                    product_id TEXT NOT NULL REFERENCES products(id),
+                    quantity REAL NOT NULL,
+                    separated_qty REAL DEFAULT 0 NOT NULL,
+                    checked_qty REAL DEFAULT 0 NOT NULL,
+                    status TEXT DEFAULT 'pendente' NOT NULL,
+                    pickup_point INTEGER NOT NULL,
+                    section TEXT NOT NULL,
+                    qty_picked REAL DEFAULT 0,
+                    qty_checked REAL DEFAULT 0,
+                    exception_type TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS work_units (
+                    id TEXT PRIMARY KEY,
+                    order_id TEXT REFERENCES orders(id),
+                    status TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    pickup_point INTEGER,
+                    section TEXT,
+                    assigned_user_id TEXT REFERENCES users(id),
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    completed_at TEXT,
+                    locked_by TEXT REFERENCES users(id),
+                    locked_at TEXT,
+                    lock_expires_at TEXT,
+                    cart_qr_code TEXT,
+                    pallet_qr_code TEXT,
+                    started_at TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS exceptions (
+                    id TEXT PRIMARY KEY,
+                    work_unit_id TEXT NOT NULL REFERENCES work_units(id),
+                    order_item_id TEXT NOT NULL REFERENCES order_items(id),
+                    type TEXT NOT NULL,
+                    quantity REAL NOT NULL,
+                    observation TEXT,
+                    reported_by TEXT NOT NULL REFERENCES users(id),
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT REFERENCES users(id),
+                    action TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT,
+                    details TEXT,
+                    previous_value TEXT,
+                    new_value TEXT,
+                    ip_address TEXT,
+                    user_agent TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+            """)
+            
+            # Additional tables for server functionality
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS section_groups (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    sections TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS picking_sessions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id),
+                    order_id TEXT NOT NULL REFERENCES orders(id),
+                    section_id TEXT NOT NULL,
+                    last_heartbeat TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    UNIQUE(order_id, section_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id),
+                    token TEXT NOT NULL,
+                    session_key TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS manual_qty_rules (
+                    id TEXT PRIMARY KEY,
+                    rule_type TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    description TEXT,
+                    active INTEGER DEFAULT 1,
+                    created_by TEXT REFERENCES users(id),
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS db2_mappings (
+                    id TEXT PRIMARY KEY,
+                    dataset TEXT NOT NULL,
+                    version INTEGER DEFAULT 1 NOT NULL,
+                    is_active INTEGER DEFAULT 0 NOT NULL,
+                    mapping_json TEXT NOT NULL,
+                    description TEXT,
+                    created_by TEXT REFERENCES users(id),
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+            """)
+            
+            conn.commit()
+            log(f"SQLite OK | arquivo=database.db | schema=OK")
+        except Exception as e:
+            log(f"Erro ao criar tabelas da aplicacao: {e}")
+            import traceback
+            traceback.print_exc()
+            
     except Exception as e:
-        log(f"Nota: Erro ao tentar criar usuários: {e}")
+        log(f"Erro CRITICO ao inicializar SQLite: {e}")
+        return
 
-    conn.commit()
-    conn.close()
-    log("Schema SQLite inicializado com sucesso!")
+    finally:
+        try:
+            conn.close()
+        except:
+            pass
 
 
 def gerar_sql_orcamentos() -> str:
     """Lê SQL de orçamentos do arquivo .sql"""
     try:
-        with open('sql/orcamentos.sql', 'r', encoding='utf-8') as f:
+        path_sql = os.path.join(PROJECT_ROOT, "sql", "orcamentos.sql")
+        # Check if file exists, if not use fallback
+        if not os.path.exists(path_sql):
+             log("WARN: sql/orcamentos.sql nao encontrado. Usando query fallback.")
+             return "SELECT * FROM DUMMY" # Should not happen if environment is correct
+             
+        with open(path_sql, 'r', encoding='utf-8') as f:
             return f.read()
     except Exception as e:
         log(f"Erro ao ler sql/orcamentos.sql: {e}")
         return ""
+
 
 # (Original query removed)
 
@@ -579,7 +677,7 @@ def sync_orcamentos(conn_db2, conn_sqlite: sqlite3.Connection):
     """Sincroniza tabela cache_orcamentos (Janela 31 dias)."""
     cursor = conn_sqlite.cursor()
     
-    log(f"Sincronizando ORCAMENTOS (Últimos 31 dias)...")
+    # log(f"Sincronizando ORCAMENTOS (Últimos 31 dias)...")
     query = gerar_sql_orcamentos()
 
     
@@ -589,7 +687,7 @@ def sync_orcamentos(conn_db2, conn_sqlite: sqlite3.Connection):
         log(f"  ERRO ao executar query: {e}")
         return
     
-    log(f"  {len(dados)} registros obtidos do DB2")
+    # log(f"  {len(dados)} registros obtidos do DB2")
     
     # ESTRATÉGIA WINDOW SYNC:
     # 1. Deletar tudo da janela (32 dias pra trás para garantir)
@@ -597,10 +695,11 @@ def sync_orcamentos(conn_db2, conn_sqlite: sqlite3.Connection):
     # Isso garante que registros excluídos no DB2 sumam do SQLite.
     
     cutoff_date = (datetime.now() - timedelta(days=32)).strftime('%Y-%m-%d')
+    deleted_count = 0
     try:
         cursor.execute("DELETE FROM cache_orcamentos WHERE DTMOVIMENTO >= ?", (cutoff_date,))
         deleted_count = cursor.rowcount
-        log(f"  {deleted_count} registros removidos da janela local (>= {cutoff_date})")
+        # log(f"  {deleted_count} registros removidos da janela local (>= {cutoff_date})")
     except Exception as e:
         log(f"  Erro ao limpar janela local: {e}")
     
@@ -646,7 +745,7 @@ def sync_orcamentos(conn_db2, conn_sqlite: sqlite3.Connection):
                 row.get('FLAGCANCELADO', ''),
                 str(row.get('IDCLIFOR', '')),
                 row.get('DESCLIENTE', ''),
-                formatar_data(row.get('DTMOVIMENTO')),
+                formatar_datetime(row.get('DTMOVIMENTO')),
                 str(row.get('IDRECEBIMENTO', '')),
                 row.get('DESCRRECEBIMENTO', ''),
                 row.get('FLAGPRENOTAPAGA', ''),
@@ -660,7 +759,8 @@ def sync_orcamentos(conn_db2, conn_sqlite: sqlite3.Connection):
             erros += 1
     
     conn_sqlite.commit()
-    log(f"  {inseridos} registros inseridos. {erros} erros.")
+    conn_sqlite.commit()
+    log(f"ORCAMENTOS (31d) | obtidos={len(dados)} | removidos={deleted_count} (>= {cutoff_date}) | inseridos={inseridos} | erros={erros}")
 
 
 import uuid
@@ -668,12 +768,12 @@ import uuid
 def load_pg_mappings(dataset: str) -> Optional[list]:
     """Carrega mapeamento ativo do PostgreSQL para o dataset especificado."""
     if not psycopg2:
-        log("psycopg2 nao instalado - usando mapeamento legado")
+        # log("psycopg2 nao instalado - usando mapeamento legado")
         return None
     
     pg_url = os.environ.get('DATABASE_URL')
     if not pg_url:
-        log("DATABASE_URL nao configurada - usando mapeamento legado")
+        # log("DATABASE_URL nao configurada - usando mapeamento legado")
         return None
     
     try:
@@ -690,10 +790,10 @@ def load_pg_mappings(dataset: str) -> Optional[list]:
             mapping = row[0]
             if isinstance(mapping, str):
                 mapping = json_module.loads(mapping)
-            log(f"  Mapping ativo encontrado para '{dataset}' ({len(mapping)} campos)")
+            # log(f"  Mapping ativo encontrado para '{dataset}' ({len(mapping)} campos)")
             return mapping
         else:
-            log(f"  Nenhum mapping ativo para '{dataset}' - usando mapeamento legado")
+            # log(f"  Nenhum mapping ativo para '{dataset}' - usando mapeamento legado")
             return None
     except Exception as e:
         log(f"  Erro ao carregar mapping do PostgreSQL: {e}")
@@ -744,20 +844,17 @@ def transform_data(conn_sqlite: sqlite3.Connection):
     Transforma dados brutos de cache_orcamentos em orders/products/work_units
     para uso da aplicação. Otimizado com Bulk Insert.
     """
-    log("=" * 60)
-    log("TRANSFORMANDO DADOS PARA APLICAÇÃO (OTIMIZADO)")
-    log("=" * 60)
-    
     # Carregar mapeamentos do PostgreSQL (se disponiveis)
     orders_mapping = load_pg_mappings("orders")
     products_mapping = load_pg_mappings("products")
     items_mapping = load_pg_mappings("order_items")
     
     use_dynamic_mapping = (orders_mapping is not None or products_mapping is not None or items_mapping is not None)
+
     if use_dynamic_mapping:
-        log("  Usando mapeamento dinamico do Mapping Studio")
-    else:
-        log("  Usando mapeamento legado (hardcoded)")
+        log("Transformação | Usando mapeamento dinâmico do Mapping Studio")
+    # else:
+    #     log("Transformação | WARN: psycopg2 ausente; usando mapeamento legado (hardcoded)")
     
     cursor = conn_sqlite.cursor()
     
@@ -784,14 +881,21 @@ def transform_data(conn_sqlite: sqlite3.Connection):
     existing_items = set((r[0], r[1]) for r in cursor.fetchall()) # Set of tuples
     
     # Work units
-    cursor.execute("SELECT order_id FROM work_units")
-    existing_work_units = set(r[0] for r in cursor.fetchall())
+    cursor.execute("SELECT order_id, section, pickup_point FROM work_units")
+    existing_work_units = set((r[0], str(r[1]) if r[1] is not None else None, int(r[2]) if r[2] is not None else 0) for r in cursor.fetchall())
+    
+    # DEBUG logs removed to reduce console spam
+    # if not QUIET:
+    #     print(f"DEBUG: existing_items size: {len(existing_items)}")
+    #     print(f"DEBUG: Sample existing_items: {list(existing_items)[:5]}")
 
     
     # Batches for insert
     upsert_orders = []
     new_products = []
     new_items = []
+    unique_pickup_points = set()
+    unique_sections = set()
     new_work_units = []
     
     # Helper Data Structures for this Batch
@@ -874,18 +978,26 @@ def transform_data(conn_sqlite: sqlite3.Connection):
         else:
             fin_status = 'pendente'
 
+        # Prepare pickup_points JSON
+        pickup_point_val = data.get('pickup_point')
+        pickup_points_json = json.dumps([pickup_point_val]) if pickup_point_val else '[]'
+
         # Always add to upsert list (Update existing ones too)
         upsert_orders.append((
             order_uuid, erp_order_id, data['customer_name'], data['customer_code'], 
-            data['total_value'], fin_status, data.get('created_at')
+            data['total_value'], fin_status, pickup_points_json, data.get('created_at')
         ))
         
-        # --- WORK UNIT (1 per Order) ---
-        if order_uuid not in existing_work_units:
-             new_work_units.append((
-                 str(uuid.uuid4()), order_uuid, data.get('pickup_point') or 0, str(data.get('section') or '')
-             ))
-             existing_work_units.add(order_uuid)
+        # --- WORK UNIT (Removed: Will be calculated from items) ---
+        # if order_uuid not in existing_work_units:
+        #      new_work_units.append((
+        #          str(uuid.uuid4()), order_uuid, data.get('pickup_point') or 0, None
+        #      ))
+        #      existing_work_units.add(order_uuid)
+
+        # Track sections/pickup_points for this order
+        order_distinct_configs = set()
+
              
         # --- ITEMS ---
         for item in data['items']:
@@ -920,6 +1032,8 @@ def transform_data(conn_sqlite: sqlite3.Connection):
                 raw_qty = float(item.get('QTDPRODUTO') or 0)
                 real_qty = raw_qty / 1000.0
                 
+
+
                 if not prod_uuid:
                     prod_uuid = batch_products_map.get(erp_prod_code)
                     if not prod_uuid:
@@ -933,21 +1047,71 @@ def transform_data(conn_sqlite: sqlite3.Connection):
                         ))
                         batch_products_map[erp_prod_code] = prod_uuid
             
+            # Determine Pickup Point & Section
+            if items_mapping:
+                mapped_item_data = apply_mapping(item, items_mapping)
+                item_pickup = mapped_item_data.get('pickup_point')
+                item_section = str(mapped_item_data.get('section') or '')
+            else:
+                item_pickup = item.get('IDLOCALRETIRADA')
+                item_section = str(item.get('IDSECAO'))
+            
+            # Capture Pickup Point Name (Always, even if item exists)
+            if item_pickup and item_pickup > 0:
+                pp_name = item.get('LOCALRETESTOQUE') or f"Ponto {item_pickup}"
+                unique_pickup_points.add((item_pickup, pp_name))
+
+            # Capture Section Name
+            if item_section and str(item_section).isdigit():
+                sec_id = int(item_section)
+                sec_name = item.get('DESCRSECAO') or f"Seção {sec_id}"
+                unique_sections.add((sec_id, sec_name))
+
             # Item Relation
             if (order_uuid, prod_uuid) not in existing_items:
-                if items_mapping:
-                    mapped_item_data = apply_mapping(item, items_mapping)
-                    item_pickup = mapped_item_data.get('pickup_point')
-                    item_section = str(mapped_item_data.get('section') or '')
-                else:
-                    item_pickup = item.get('IDLOCALRETIRADA')
-                    item_section = str(item.get('IDSECAO'))
                 new_items.append((
                     str(uuid.uuid4()), order_uuid, prod_uuid, real_qty,
                     item_pickup, item_section
                 ))
                 existing_items.add((order_uuid, prod_uuid))
-                
+
+            # Add to configs for Work Units
+            # Use '0' string for section if empty, or handle as None?
+            # DB stores TEXT for section. We preserve what came from item logic.
+            # For pickup, ensure int
+            wu_section = item_section if item_section else None
+            wu_pickup = int(item_pickup) if item_pickup else 0
+            order_distinct_configs.add((wu_section, wu_pickup))
+
+        # --- Create Work Units based on Distinct Items ---
+        for (sec, pp) in order_distinct_configs:
+            # Check existence: order_id + section + pickup
+            # Note: existing_work_units now stores (order_id, section, pickup)
+            # Ensure types match for lookup
+            lookup_sec = str(sec) if sec is not None else None
+            lookup_pp = int(pp)
+            
+            if (order_uuid, lookup_sec, lookup_pp) not in existing_work_units:
+                new_work_units.append((
+                    str(uuid.uuid4()), order_uuid, pp, sec
+                ))
+                # Add to set to avoid dups in this same run (if any)
+                existing_work_units.add((order_uuid, lookup_sec, lookup_pp))
+
+
+
+    # Insert Pickup Points
+    try:
+        if unique_pickup_points:
+            cursor.executemany("INSERT OR REPLACE INTO pickup_points (id, name, active) VALUES (?, ?, 1)", list(unique_pickup_points))
+            
+        if unique_sections:
+            cursor.executemany("INSERT OR REPLACE INTO sections (id, name) VALUES (?, ?)", list(unique_sections))
+            
+        conn_sqlite.commit()
+    except Exception as e:
+        log(f"Erro ao inserir pontos/seções: {e}")
+
     # 3. Bulk Inserts
     try:
         if new_products:
@@ -960,12 +1124,13 @@ def transform_data(conn_sqlite: sqlite3.Connection):
         if upsert_orders:
             # Upsert Logic: Update Financial Status if order exists
             cursor.executemany("""
-                INSERT INTO orders (id, erp_order_id, customer_name, customer_code, total_value, financial_status, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'pendente', ?)
+                INSERT INTO orders (id, erp_order_id, customer_name, customer_code, total_value, financial_status, pickup_points, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pendente', ?)
                 ON CONFLICT(erp_order_id) DO UPDATE SET
                     financial_status = excluded.financial_status,
                     total_value = excluded.total_value,
                     customer_name = excluded.customer_name,
+                    pickup_points = excluded.pickup_points,
                     updated_at = CURRENT_TIMESTAMP
             """, upsert_orders)
             
@@ -987,8 +1152,7 @@ def transform_data(conn_sqlite: sqlite3.Connection):
         conn_sqlite.commit()
         
         # Log Summary
-        log(f"Base de Dados: {len(existing_orders)} Pedidos processados.")
-        log(f"Transformação Completa: {len(upsert_orders)} Pedidos sincronizados (upsert), {len(new_items)} Novos itens.")
+        log(f"Transformação | pedidos_processados={len(orders_map)} | pedidos_upsert={len(upsert_orders)} | novos_itens={len(new_items)}")
         
     except Exception as e:
         log(f"Erro no Bulk Insert: {e}")
@@ -1091,51 +1255,51 @@ def sync_tubos_conexoes(conn_db2, conn_sqlite: sqlite3.Connection):
 
 
 def sincronizar(data_inicial: Optional[str] = None) -> bool:
-    """Executa sincronização completa."""
-    log("=" * 60)
-    log("INICIANDO SINCRONIZAÇÃO DB2 -> SQLite (Window)")
-    log("=" * 60)
+    """Fluxo principal de sincronização."""
+    inicio = time.time()
     
-    inicializar_sqlite()
     
-    if not pyodbc:
-        log("AVISO: Driver DB2 (pyodbc) não encontrado. Pular sincronização.")
-        return True
+    # Validacao do driver ja feita no import
+    # if not pyodbc: ...
 
     try:
         conn_db2 = conectar_db2()
-        log("Conectado ao DB2 com sucesso!")
     except Exception as e:
-        log(f"ERRO ao conectar ao DB2: {e}")
+        log(f"ERRO FATAL DB2: {e}")
         return False
-    
+        
     try:
         conn_sqlite = sqlite3.connect(DATABASE_PATH)
-        log(f"Conectado ao SQLite: {DATABASE_PATH}")
-        
-        inicio = time.time()
         
         sync_orcamentos(conn_db2, conn_sqlite)
         transform_data(conn_sqlite)
-        # sync_pendentes(conn_db2, conn_sqlite) -- DISABLED
-        # sync_tubos_conexoes(conn_db2, conn_sqlite) -- DISABLED
+        
+    # Vendas Pendentes e Tubos foram removidos do fluxo.
+    # sync_pendentes(conn_db2, conn_sqlite)
+    # sync_tubos_conexoes(conn_db2, conn_sqlite)
+        
+    # Vendas Pendentes e Tubos foram removidos do fluxo.
+    # sync_pendentes(conn_db2, conn_sqlite)
+    # sync_tubos_conexoes(conn_db2, conn_sqlite)
         
         duracao = time.time() - inicio
-        log(f"Sincronização concluída em {duracao:.2f} segundos")
-        log("=" * 60)
+        duracao = time.time() - inicio
+        # log(f"Sync concluído | duração={duracao:.2f}s")
         
-        conn_db2.close()
-        conn_sqlite.close()
         return True
         
+        return True
     except Exception as e:
-        log(f"ERRO DB2: {e}")
-        return False
-    except Exception as e:
-        log(f"ERRO: {e}")
+        log(f"ERRO NO PROCESSO DE SYNC: {e}")
         import traceback
         traceback.print_exc()
         return False
+    finally:
+        try:
+            conn_db2.close()
+            conn_sqlite.close()
+        except:
+            pass
 
 
 def iniciar_servidor():
@@ -1157,15 +1321,17 @@ def iniciar_servidor():
     # Auto-fix port
     kill_port_411()
     
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Web OK | url=http://localhost:411")
+    
     if is_windows:
-        log("Executando servidor (Windows)...")
+        # log("Executando servidor (Windows)...")
         env = os.environ.copy()
         env["NODE_ENV"] = "development"
         env["PORT"] = "411"
         try:
             subprocess.run("npx tsx server/index.ts", shell=True, cwd=PROJECT_ROOT, env=env)
         except KeyboardInterrupt:
-            log("\nServidor interrompido pelo usuário.")
+             log("\nServidor interrompido pelo usuário.")
     else:
         log("Executando: npm run dev")
         env = os.environ.copy()
@@ -1210,30 +1376,53 @@ Exemplos:
         QUIET = True
     
     # 1. Sincronização Inicial (Bloqueante)
-    log("Executando sincronização inicial...")
+    # Ex: [2026-02-08 21:30:13] Sync iniciado | modo=serve | SO=Windows
+    modo_str = "serve" if args.serve else ("loop" if args.loop else "once")
+    if not QUIET:
+        log(f"Sync iniciado | modo={modo_str} | SO={platform.system()}")
+
+    # Garantir que tabelas existam
+    inicializar_sqlite()
+    
+    # Passar args para sincronizar
     sucesso = sincronizar(data_inicial=args.desde)
     
     # 2. Configurar Loop (Thread se Serve, Main se Loop-Only)
-    intervalo = args.loop or 300
-    
-    should_loop = args.serve or args.loop
-    
-    if args.serve:
-        # Servidor Ativo: Loop em Thread Daemon
-        t = threading.Thread(target=loop_sync, args=(intervalo, args.desde), daemon=True)
-        t.start()
-        
-        log("Iniciando servidor na porta 411...")
-        iniciar_servidor()
+    should_loop = args.loop is not None or args.serve
+    intervalo = args.loop if args.loop else 300
 
-    elif args.loop:
-        # Apenas Loop (Bloqueante)
-        try:
-            loop_sync(intervalo, args.desde)
-        except KeyboardInterrupt:
-            log("\nLoop interrompido pelo usuário.")
+    if should_loop:
+        if args.loop or args.serve:
+             # Se foi explicito o loop ou tem server (que implica loop default), avisa
+             # Mas se for so server sem args.loop, o usuario nao pediu explicito o loop, mas o sistema faz.
+             # O log original do usuario nao mostrava "Modo Loop ativado" se nao passasse --loop? 
+             # O usuario pediu output exato.
+             # [2026-02-08 21:51:09] Sync concluído | duração=8.13s
+             # [2026-02-08 21:30:24] Web OK ...
+             # Nao tem log de "Modo Loop" no exemplo dele.
+             if args.loop:
+                 log(f"Modo Loop ativado: {intervalo} segundos")
         
-    else:
+        def loop_sync_internal(): 
+            while True:
+                time.sleep(intervalo)
+                sincronizar()
+        
+        if args.serve:
+            # Thread para o loop, Main para o servidor
+            t = threading.Thread(target=loop_sync_internal, daemon=True)
+            t.start()
+        else:
+            # Main para o loop
+            try:
+                loop_sync_internal()
+            except KeyboardInterrupt:
+                if not args.quiet:
+                    log("\nLoop interrompido pelo usuário.")
+
+    # 3. Servidor Web
+    if args.serve:
+        iniciar_servidor()
         # Apenas Uma Execução
         if not sucesso:
             sys.exit(1)

@@ -27,8 +27,8 @@ export function ScanInput({
   className,
   value: controlledValue,
   onChange: controlledOnChange,
-  readOnly,
-  inputMode,
+  readOnly = false,
+  inputMode = "none", // Desabilita teclado virtual por padrão (apenas scanner/paste)
 }: ScanInputProps) {
   const [internalValue, setInternalValue] = useState("");
 

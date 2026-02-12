@@ -57,8 +57,8 @@ export default function LoginPage() {
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-[hsl(213,67%,22%)] via-[hsl(207,62%,35%)] to-[hsl(157,50%,28%)] p-4">
       <div className="w-full max-w-md">
         <div className="flex flex-col items-center mb-8">
-          <img src="/stokar-logo.png" alt="Stokar" className="h-20 mb-2 drop-shadow-xl rounded-2xl" style={{ mixBlendMode: "screen" }} />
-          <p className="text-white/70 mt-1 text-sm italic">Warehouse Management System</p>
+          <h1 className="text-5xl font-bold text-white mb-2 drop-shadow-xl tracking-tight">Stokar</h1>
+          <p className="text-white/70 mt-2 text-sm italic">Warehouse Management System</p>
         </div>
 
         <Card className="shadow-2xl border-0 bg-white/95 backdrop-blur-sm">

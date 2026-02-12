@@ -44,6 +44,7 @@ export default function RouteOrdersPage() {
     const queryClient = useQueryClient();
 
     const [filterDateRange, setFilterDateRange] = useState<DateRange | undefined>(getCurrentWeekRange());
+    const [tempDateRange, setTempDateRange] = useState<DateRange | undefined>(getCurrentWeekRange());
     const [selectedRouteFilter, setSelectedRouteFilter] = useState<string>("all");
     const [searchQuery, setSearchQuery] = useState("");
     const [selectedPickupPoint, setSelectedPickupPoint] = useState<string>("all");
@@ -67,7 +68,6 @@ export default function RouteOrdersPage() {
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
             queryClient.invalidateQueries({ queryKey: ["/api/routes"] });
-            setSelectedOrders([]);
             setShowAssignDialog(false);
             toast({
                 title: "Rotas atualizadas",
@@ -106,10 +106,20 @@ export default function RouteOrdersPage() {
             }
         }
 
-        // Search Filter
+        // Helper para busca múltipla
+        const processMultipleOrderSearch = (searchValue: string, orderCode: string): boolean => {
+            if (!searchValue.trim()) return true;
+            if (searchValue.includes(',')) {
+                const terms = searchValue.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+                return terms.some(term => orderCode.toLowerCase().includes(term));
+            }
+            return orderCode.toLowerCase().includes(searchValue.toLowerCase());
+        };
+
+        // Search Filter (Multiple Order IDs with comma)
         if (searchQuery) {
             const query = searchQuery.toLowerCase();
-            const matchesId = order.erpOrderId.toLowerCase().includes(query);
+            const matchesId = processMultipleOrderSearch(searchQuery, order.erpOrderId);
             const matchesCustomer = order.customerName.toLowerCase().includes(query);
             if (!matchesId && !matchesCustomer) return false;
         }
@@ -183,7 +193,10 @@ export default function RouteOrdersPage() {
 
                         <div className="flex items-center gap-2 w-full md:w-auto">
                             <Calendar className="h-4 w-4 text-muted-foreground" />
-                            <DatePickerWithRange date={filterDateRange} onDateChange={setFilterDateRange} />
+                            <DatePickerWithRange date={tempDateRange} onDateChange={setTempDateRange} />
+                            <Button variant="secondary" onClick={() => setFilterDateRange(tempDateRange)}>
+                                Buscar
+                            </Button>
                         </div>
 
                         <div className="flex gap-2 w-full md:w-auto">

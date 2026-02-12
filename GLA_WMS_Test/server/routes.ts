@@ -3,13 +3,15 @@ import { createServer, type Server } from "http";
 import cookieParser from "cookie-parser";
 import { storage } from "./storage";
 import { hashPassword, verifyPassword, createAuthSession, isAuthenticated, requireRole, getTokenFromRequest, getUserFromToken } from "./auth";
-import { loginSchema, insertRouteSchema, orderItems, pickingSessions, type MappingField, datasetEnum } from "@shared/schema";
+import { loginSchema, insertRouteSchema, orderItems, pickingSessions, pickupPoints, type MappingField, datasetEnum, type User, type OrderItem, type Product, type WorkUnit, type Exception, type PickingSession, type ExceptionType, type ManualQtyRule, type UserSettings } from "@shared/schema";
 import { z } from "zod";
 import { exec } from "child_process";
 import path from "path";
 import { setupSSE, broadcastSSE } from "./sse";
 import { db } from "./db";
+import { eq } from "drizzle-orm";
 import { getDataContract, getAvailableDatasets } from "./data-contracts";
+import { log } from "./log";
 
 const LOCK_TTL_MINUTES = 15;
 
@@ -274,7 +276,7 @@ export async function registerRoutes(
 
   app.post("/api/users", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
     try {
-      const { username, password, name, role } = req.body;
+      const { username, password, name, role, sections, settings, active } = req.body;
 
       const existing = await storage.getUserByUsername(username);
       if (existing) {
@@ -287,6 +289,9 @@ export async function registerRoutes(
         password: hashedPassword,
         name,
         role,
+        sections: sections || [],
+        settings: settings || {},
+        active: active !== undefined ? active : true,
       });
 
       await storage.createAuditLog({
@@ -326,7 +331,9 @@ export async function registerRoutes(
       // If sections are provided, ensure they are stored correctly (handled by schema/storage types usually, but let's be explicit if needed)
       // The schema defines sections as json, and drizzle/sqlite handles it. 
 
+      // console.log(`[DEBUG] Updating user ${id} with:`, JSON.stringify(updateData));
       const updatedUser = await storage.updateUser(id, updateData);
+      // console.log(`[DEBUG] Update result:`, updatedUser ? "Success" : "Failed (undefined return)");
 
       if (updatedUser) {
         await storage.createAuditLog({
@@ -342,7 +349,7 @@ export async function registerRoutes(
         const { password: _, ...safeUser } = updatedUser;
         res.json(safeUser);
       } else {
-        res.status(500).json({ error: "Falha ao atualizar usuário" });
+        res.status(500).json({ error: "Falha ao atualizar usuário - retorno vazio do banco" });
       }
     } catch (error) {
       console.error("Update user error:", error);
@@ -400,8 +407,8 @@ export async function registerRoutes(
 
   app.get("/api/pickup-points", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const result = await db.selectDistinct({ pickupPoint: orderItems.pickupPoint }).from(orderItems).orderBy(orderItems.pickupPoint);
-      res.json(result.map(r => r.pickupPoint));
+      const result = await db.select().from(pickupPoints).where(eq(pickupPoints.active, true)).orderBy(pickupPoints.id);
+      res.json(result);
     } catch (error) {
       console.error("Get pickup points error:", error);
       res.status(500).json({ error: "Erro interno" });
@@ -431,17 +438,15 @@ export async function registerRoutes(
 
   app.post("/api/sections/groups", isAuthenticated, async (req: Request, res: Response) => {
     try {
-      console.log('POST /api/sections/groups - Request body:', req.body);
+
       const { name, sections } = req.body;
 
       if (!name || !sections || !Array.isArray(sections)) {
-        console.error('Validation failed:', { name, sections, isArray: Array.isArray(sections) });
+
         return res.status(400).json({ error: "Nome e seções são obrigatórios" });
       }
 
-      console.log('Creating group:', { name, sectionCount: sections.length });
       const newGroup = await storage.createSectionGroup({ name, sections });
-      console.log('Group created successfully:', newGroup);
 
       res.json(newGroup);
     } catch (error) {
@@ -719,6 +724,82 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/orders/cancel-launch", isAuthenticated, requireRole("supervisor", "administrador"), async (req: Request, res: Response) => {
+    try {
+      const { orderIds } = req.body;
+
+      if (!Array.isArray(orderIds) || orderIds.length === 0) {
+        return res.status(400).json({ error: "IDs de pedidos inválidos" });
+      }
+
+      // Process each order
+      for (const orderId of orderIds) {
+        const order = await storage.getOrderById(orderId);
+        if (!order) {
+          return res.status(404).json({
+            error: "Pedido não encontrado",
+            details: `Pedido ${orderId} não existe.`
+          });
+        }
+
+        // Check if order was launched
+        if (!order.isLaunched) {
+          return res.status(400).json({
+            error: "Ação bloqueada",
+            details: `O pedido ${order.erpOrderId} não foi lançado para separação.`
+          });
+        }
+
+        // Check order status - only allow cancellation for specific statuses
+        const allowedStatuses = ["pendente", "em_separacao", "separado"];
+
+        if (!allowedStatuses.includes(order.status)) {
+          return res.status(400).json({
+            error: "Ação bloqueada",
+            details: `O pedido ${order.erpOrderId} está com status '${order.status}' e não pode ter o lançamento cancelado. Apenas pedidos com status 'Pendente a Separar', 'Em Separação' ou 'Separado' podem ser cancelados.`
+          });
+        }
+
+        // Check for active picking sessions
+        const activeSessions = await storage.getPickingSessionsByOrder(orderId);
+
+        if (activeSessions.length > 0) {
+          // Get operator name from first session
+          const session = activeSessions[0];
+          const operator = await storage.getUser(session.userId);
+          const operatorName = operator ? operator.name : "Operador desconhecido";
+
+          return res.status(400).json({
+            error: "Ação bloqueada",
+            details: `Pedido não pode ser cancelado pois o operador '${operatorName}' está com o pedido em aberto.`
+          });
+        }
+
+        // Cancel the launch
+        await storage.cancelOrderLaunch(orderId);
+
+        // Create audit log
+        await storage.createAuditLog({
+          userId: (req as any).user.id,
+          action: "cancel_launch",
+          entityType: "order",
+          entityId: orderId,
+          details: `Lançamento cancelado para pedido ${order.erpOrderId}`,
+          ipAddress: getClientIp(req),
+          userAgent: getUserAgent(req),
+        });
+      }
+
+      // Broadcast SSE notification
+      broadcastSSE("orders_launch_cancelled", { orderIds });
+
+      res.json({ success: true, message: "Lançamento cancelado com sucesso" });
+    } catch (error) {
+      console.error("Cancel launch error:", error);
+      res.status(500).json({ error: "Erro interno ao cancelar lançamento" });
+    }
+  });
+
   // Stats
   app.get("/api/stats", isAuthenticated, async (req: Request, res: Response) => {
     try {
@@ -771,6 +852,10 @@ export async function registerRoutes(
         for (const id of workUnitIds) {
           await storage.resetWorkUnitProgress(id);
         }
+        // Se \u00e9 um reset total, for\u00e7amos o status para pendente para evitar travas de l\u00f3gica
+        for (const orderId of affectedOrderIds) {
+          await storage.updateOrder(orderId, { status: "pendente" });
+        }
       }
 
       for (const orderId of affectedOrderIds) {
@@ -815,6 +900,57 @@ export async function registerRoutes(
       res.json({ success: true, expiresAt });
     } catch (error) {
       console.error("Lock work units error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.post("/api/work-units/batch/scan-cart", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const { workUnitIds, qrCode } = req.body;
+
+      if (!Array.isArray(workUnitIds) || workUnitIds.length === 0) {
+        return res.status(400).json({ error: "IDs das unidades de trabalho são obrigatórios" });
+      }
+
+      const results = [];
+      const orderIdsToUpdate = new Set<string>();
+
+      // Processar atualizações em paralelo (limitado pelo banco, mas OK para SQLite neste volume)
+      for (const id of workUnitIds) {
+        const workUnit = await storage.getWorkUnitById(id);
+        if (!workUnit) continue;
+
+        await storage.updateWorkUnit(id, {
+          cartQrCode: qrCode,
+          status: "em_andamento",
+          startedAt: new Date().toISOString()
+        });
+
+        if (workUnit.orderId) {
+          orderIdsToUpdate.add(workUnit.orderId);
+        }
+
+        results.push(id);
+      }
+
+      // Atualizar status dos pedidos
+      for (const orderId of orderIdsToUpdate) {
+        const order = await storage.getOrderById(orderId);
+        if (order && order.status === "pendente") {
+          await storage.updateOrder(orderId, {
+            status: "em_separacao",
+            updatedAt: new Date().toISOString()
+          });
+        }
+        // Broadcast genérico por pedido para evitar spam de SSE
+        broadcastSSE("picking_started", { orderId, userId: (req as any).user.id });
+      }
+
+
+
+      res.json({ success: true, updatedCount: results.length });
+    } catch (error) {
+      console.error("Batch scan cart error:", error);
       res.status(500).json({ error: "Erro interno" });
     }
   });
@@ -918,6 +1054,11 @@ export async function registerRoutes(
             status: "recontagem",
           });
           // Also reset work unit status if it was completed
+          // Também resetar status do pedido se estava como separado
+          const order = await storage.getOrderById(workUnit.orderId);
+          if (order && order.status === "separado") {
+            await storage.updateOrder(workUnit.orderId, { status: "em_separacao" });
+          }
           await storage.updateWorkUnit(req.params.id as string, { status: "em_andamento" });
 
           const resetWorkUnit = await storage.getWorkUnitById(req.params.id as string);
@@ -950,7 +1091,47 @@ export async function registerRoutes(
         });
       }
 
-      const newQty = currentQty + 1;
+      // Aceitar quantidade opcional do frontend (padrão = 1)
+      const requestedQty = Number(req.body.quantity || 1);
+      const availableQty = adjustedTarget - currentQty;
+
+      // Se a quantidade solicitada exceder o disponível, aplicar regra de reset
+      if (requestedQty > availableQty) {
+        // Reset to zero as per user requirement
+        await storage.updateOrderItem(item.id, {
+          separatedQty: 0,
+          status: "recontagem",
+        });
+        // Também resetar status do pedido se estava como separado
+        const order = await storage.getOrderById(workUnit.orderId);
+        if (order && order.status === "separado") {
+          await storage.updateOrder(workUnit.orderId, { status: "em_separacao" });
+        }
+        await storage.updateWorkUnit(req.params.id as string, { status: "em_andamento" });
+
+        const resetWorkUnit = await storage.getWorkUnitById(req.params.id as string);
+
+        if (exceptionQty > 0) {
+          return res.json({
+            status: "over_quantity_with_exception",
+            workUnit: resetWorkUnit,
+            product,
+            quantity: requestedQty,
+            exceptionQty,
+            message: `Este item tem ${exceptionQty} unidade(s) com exceção. Quantidade disponível: ${availableQty}. Separação resetada.`
+          });
+        }
+
+        return res.json({
+          status: "over_quantity",
+          product,
+          quantity: requestedQty,
+          workUnit: resetWorkUnit,
+          message: `Quantidade excedida! Disponível: ${availableQty}. Separação resetada.`
+        });
+      }
+
+      const newQty = currentQty + requestedQty;
       await storage.updateOrderItem(item.id, {
         separatedQty: Number(newQty),
         status: newQty >= adjustedTarget ? "separado" : "pendente",
@@ -960,11 +1141,16 @@ export async function registerRoutes(
 
       broadcastSSE("item_picked", { workUnitId: req.params.id, orderId: workUnit.orderId, productId: product.id, userId: (req as any).user.id });
 
-      const isComplete = await storage.checkAndCompleteWorkUnit(req.params.id as string);
+      const unitComplete = await storage.checkAndCompleteWorkUnit(req.params.id as string);
 
-      if (isComplete) {
-        await storage.updateOrder(workUnit.orderId, { status: "separado" });
+      if (unitComplete) {
         broadcastSSE("picking_finished", { workUnitId: req.params.id, orderId: workUnit.orderId });
+
+        // Verificar se agora TODAS as unidades do pedido est\u00e3o prontas
+        const allWusComplete = await storage.checkAllWorkUnitsComplete(workUnit.orderId);
+        if (allWusComplete) {
+          await storage.updateOrder(workUnit.orderId, { status: "separado" });
+        }
       }
 
       const finalWorkUnit = await storage.getWorkUnitById(req.params.id as string);
@@ -972,7 +1158,7 @@ export async function registerRoutes(
       res.json({
         status: "success",
         product,
-        quantity: 1,
+        quantity: requestedQty,
         workUnit: finalWorkUnit,
       });
     } catch (error) {
@@ -1025,7 +1211,13 @@ export async function registerRoutes(
       });
       if (allComplete) {
         await storage.updateWorkUnit(req.params.id as string, { status: "concluido", completedAt: new Date().toISOString() });
-        await storage.updateOrder(workUnit.orderId, { status: "conferido" });
+
+        // Verificar se TODAS as unidades / itens do pedido est\u00e3o conferidos
+        const orderAllChecked = await storage.checkAllConferenceUnitsComplete(workUnit.orderId);
+        if (orderAllChecked) {
+          await storage.updateOrder(workUnit.orderId, { status: "conferido" });
+        }
+
         broadcastSSE("conference_finished", { workUnitId: req.params.id, orderId: workUnit.orderId });
       }
 
@@ -1093,10 +1285,11 @@ export async function registerRoutes(
     try {
       const { elapsedTime } = req.body;
 
-      await storage.updateWorkUnit(req.params.id as string, {
-        status: "concluido",
-        completedAt: new Date().toISOString(),
-      });
+      const isComplete = await storage.checkAndCompleteWorkUnit(req.params.id as string);
+
+      if (!isComplete) {
+        return res.status(400).json({ error: "Existem itens pendentes" });
+      }
 
       const workUnit = await storage.getWorkUnitById(req.params.id as string);
       if (workUnit) {
@@ -1128,7 +1321,11 @@ export async function registerRoutes(
       if (isComplete) {
         const wu = await storage.getWorkUnitById(id);
         if (wu) {
-          await storage.updateOrder(wu.orderId, { status: "separado" });
+          // Verificar se agora TODAS as unidades do pedido est\u00e3o prontas
+          const allWusComplete = await storage.checkAllWorkUnitsComplete(wu.orderId);
+          if (allWusComplete) {
+            await storage.updateOrder(wu.orderId, { status: "separado" });
+          }
         }
         res.json({ success: true });
       } else {
@@ -1136,6 +1333,27 @@ export async function registerRoutes(
       }
     } catch (error) {
       console.error("Manual complete error:", error);
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  app.post("/api/work-units/:id/complete-conference", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const id = req.params.id as string;
+      const isComplete = await storage.checkAndCompleteConference(id);
+
+      if (isComplete) {
+        const wu = await storage.getWorkUnitById(id);
+        if (wu) {
+          await storage.updateOrder(wu.orderId, { status: "conferido" });
+          broadcastSSE("conference_finished", { workUnitId: id, orderId: wu.orderId });
+        }
+        res.json({ success: true });
+      } else {
+        res.status(400).json({ error: "Existem itens pendentes" });
+      }
+    } catch (error) {
+      console.error("Conference complete error:", error);
       res.status(500).json({ error: "Erro interno" });
     }
   });
@@ -1351,6 +1569,108 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Clear exceptions error:", error);
       res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
+  // Authorize exceptions (supervisor/admin only)
+  app.post("/api/exceptions/authorize", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const { username, password, exceptionIds } = req.body;
+
+      if (!username || !password || !exceptionIds || !Array.isArray(exceptionIds)) {
+        return res.status(400).json({ error: "Dados inválidos" });
+      }
+
+      // Find user by username
+      const authUser = await storage.getUserByUsername(username);
+      if (!authUser) {
+        return res.status(401).json({ error: "Credenciais inválidas" });
+      }
+
+      // Verify password
+      const bcrypt = await import("bcrypt");
+      const passwordMatch = await bcrypt.compare(password, authUser.password);
+      if (!passwordMatch) {
+        return res.status(401).json({ error: "Credenciais inválidas" });
+      }
+
+      // Check role (only supervisor or admin)
+      if (authUser.role !== "supervisor" && authUser.role !== "administrador") {
+        return res.status(403).json({ error: "Apenas supervisores ou administradores podem autorizar exceções" });
+      }
+
+      // Authorize exceptions
+      const now = new Date().toISOString();
+      await storage.authorizeExceptions(exceptionIds, {
+        authorizedBy: authUser.id,
+        authorizedByName: authUser.name,
+        authorizedAt: now,
+      });
+
+      await storage.createAuditLog({
+        userId: authUser.id,
+        action: "authorize_exceptions",
+        entityType: "exceptions",
+        entityId: exceptionIds.join(","),
+        details: `Autorizou ${exceptionIds.length} exceção(ões)`,
+        ipAddress: getClientIp(req),
+        userAgent: getUserAgent(req),
+      });
+
+      return res.json({
+        success: true,
+        authorizedBy: authUser.id,
+        authorizedByName: authUser.name,
+        authorizedAt: now,
+      });
+    } catch (error) {
+      console.error("Exception authorization error:", error);
+      return res.status(500).json({ error: "Erro ao autorizar exceções" });
+    }
+  });
+
+  // Auto-authorize exceptions (for users with permission)
+  app.post("/api/exceptions/auto-authorize", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const { exceptionIds } = req.body;
+      const user = (req as any).user;
+
+      if (!exceptionIds || !Array.isArray(exceptionIds)) {
+        return res.status(400).json({ error: "IDs das exceções são obrigatórios" });
+      }
+
+      // Check permission
+      const userSettings = user.settings as UserSettings;
+      if (!userSettings?.canAuthorizeOwnExceptions) {
+        return res.status(403).json({ error: "Usuário não tem permissão para auto-autorizar exceções" });
+      }
+
+      const now = new Date().toISOString();
+      await storage.authorizeExceptions(exceptionIds, {
+        authorizedBy: user.id,
+        authorizedByName: user.name,
+        authorizedAt: now,
+      });
+
+      await storage.createAuditLog({
+        userId: user.id,
+        action: "auto_authorize_exceptions",
+        entityType: "exceptions",
+        entityId: exceptionIds.join(","),
+        details: `Auto-autorizou ${exceptionIds.length} exceção(ões)`,
+        ipAddress: getClientIp(req),
+        userAgent: getUserAgent(req),
+      });
+
+      return res.json({
+        success: true,
+        authorizedBy: user.id,
+        authorizedByName: user.name,
+        authorizedAt: now,
+      });
+    } catch (error) {
+      console.error("Auto-authorization error:", error);
+      return res.status(500).json({ error: "Erro ao auto-autorizar exceções" });
     }
   });
 

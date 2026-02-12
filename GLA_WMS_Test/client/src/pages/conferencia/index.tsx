@@ -29,8 +29,9 @@ import {
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import type { WorkUnitWithDetails, OrderItem, Product, ExceptionType, UserSettings } from "@shared/schema";
+import type { WorkUnitWithDetails, OrderItem, Product, ExceptionType, UserSettings, Exception } from "@shared/schema";
 import { ExceptionDialog } from "@/components/orders/exception-dialog";
+import { ExceptionAuthorizationModal } from "@/components/orders/exception-authorization-modal";
 import { getCurrentWeekRange } from "@/lib/date-utils";
 import { format } from "date-fns";
 
@@ -48,6 +49,7 @@ interface SessionData {
 interface ItemWithProduct extends OrderItem {
   product: Product;
   exceptionQty?: number;
+  exceptions?: Exception[];
 }
 
 interface AggregatedProduct {
@@ -63,21 +65,21 @@ interface AggregatedProduct {
 function saveSession(data: SessionData) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch {}
+  } catch { }
 }
 
 function loadSession(): SessionData | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
-  } catch {}
+  } catch { }
   return null;
 }
 
 function clearSession() {
   try {
     localStorage.removeItem(STORAGE_KEY);
-  } catch {}
+  } catch { }
 }
 
 export default function ConferenciaPage() {
@@ -111,6 +113,8 @@ export default function ConferenciaPage() {
 
   const [showExceptionDialog, setShowExceptionDialog] = useState(false);
   const [exceptionItem, setExceptionItem] = useState<ItemWithProduct | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [pendingExceptions, setPendingExceptions] = useState<any[]>([]);
 
   const [filterOrderId, setFilterOrderId] = useState("");
   const [filterRoute, setFilterRoute] = useState<string>("");
@@ -123,7 +127,7 @@ export default function ConferenciaPage() {
 
   const userSettings = (user?.settings as UserSettings) || {};
   const hasManualQtyPermission = !!userSettings.allowManualQty;
-  const hasMultiplierPermission = !!userSettings.allowMultiplier;
+
 
   const workUnitsQueryKey = useSessionQueryKey(["/api/work-units", "conferencia"]);
   const routesQueryKey = useSessionQueryKey(["/api/routes"]);
@@ -133,7 +137,7 @@ export default function ConferenciaPage() {
     refetchInterval: 1000,
   });
 
-  const { data: routes } = useQuery<{id: string; code: string; name: string}[]>({
+  const { data: routes } = useQuery<{ id: string; code: string; name: string }[]>({
     queryKey: routesQueryKey,
   });
 
@@ -165,7 +169,12 @@ export default function ConferenciaPage() {
 
   const aggregatedProducts = useMemo((): AggregatedProduct[] => {
     const units = allMyUnits.length > 0 ? allMyUnits : [];
-    const allItems: ItemWithProduct[] = units.flatMap(wu => (wu.items as ItemWithProduct[]) || []).filter(item => Number(item.separatedQty) > 0);
+    // Filtrar itens pela seção do usuário
+    const userSections = (user?.sections as string[]) || [];
+
+    const allItems: ItemWithProduct[] = units.flatMap(wu => (wu.items as ItemWithProduct[]) || [])
+      .filter(item => Number(item.separatedQty) > 0)
+      .filter(item => userSections.length === 0 || userSections.includes(item.section));
 
     const map: Record<string, AggregatedProduct> = {};
     allItems.forEach(item => {
@@ -196,7 +205,7 @@ export default function ConferenciaPage() {
     });
 
     return Object.values(map);
-  }, [allMyUnits]);
+  }, [allMyUnits, user]);
 
   const currentProduct = aggregatedProducts[currentProductIndex] || aggregatedProducts[0] || null;
 
@@ -207,7 +216,7 @@ export default function ConferenciaPage() {
   }, [aggregatedProducts.length, currentProductIndex]);
 
   useEffect(() => {
-    if (!hasManualQtyPermission && !hasMultiplierPermission) return;
+    if (!hasManualQtyPermission) return;
     if (aggregatedProducts.length === 0) return;
 
     const productIds = aggregatedProducts.map(ap => ap.product.id).filter(id => !(id in manualQtyAllowed));
@@ -223,7 +232,7 @@ export default function ConferenciaPage() {
         productIds.forEach(id => { fallback[id] = false; });
         setManualQtyAllowed(prev => ({ ...prev, ...fallback }));
       });
-  }, [aggregatedProducts, hasManualQtyPermission, hasMultiplierPermission]);
+  }, [aggregatedProducts, hasManualQtyPermission]);
 
   useEffect(() => {
     if (workUnits && user && !sessionRestored) {
@@ -332,21 +341,22 @@ export default function ConferenciaPage() {
       try {
         const errorData = JSON.parse(error.message);
         if (errorData.error) message = errorData.error;
-      } catch {}
+      } catch { }
       toast({ title: "Erro", description: message, variant: "destructive" });
     },
   });
 
   const completeWorkUnitMutation = useMutation({
     mutationFn: async (id: string) => {
-      const res = await apiRequest("POST", `/api/work-units/${id}/complete`);
+      const res = await apiRequest("POST", `/api/work-units/${id}/complete-conference`);
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Erro ao concluir unidade");
+      }
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
-    },
-    onError: () => {
-      toast({ title: "Erro", description: "Itens pendentes.", variant: "destructive" });
     },
   });
 
@@ -364,13 +374,32 @@ export default function ConferenciaPage() {
     },
   });
 
+  // Helper para busca múltipla por vírgula
+  const processMultipleOrderSearch = (searchValue: string, orderCode: string): boolean => {
+    if (!searchValue.trim()) return true;
+    if (searchValue.includes(',')) {
+      const terms = searchValue.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+      return terms.some(term => orderCode.toLowerCase().includes(term));
+    }
+    return orderCode.toLowerCase().includes(searchValue.toLowerCase());
+  };
+
   const availableWorkUnits = useMemo(() => {
     return workUnits?.filter((wu) => {
       const orderStatus = wu.order.status;
       if (orderStatus !== "separado" && orderStatus !== "em_conferencia") return false;
       if (!wu.order.isLaunched) return false;
       if (wu.status === "concluido") return false;
-      if (filterOrderId && !wu.order.erpOrderId.toLowerCase().includes(filterOrderId.toLowerCase())) return false;
+
+      const userSections = (user?.sections as string[]) || [];
+      if (userSections.length > 0) {
+        // Since wu.section is now null (Unified), we check items
+        const hasRelevantItems = wu.items.some(item => userSections.includes(item.section));
+        if (!hasRelevantItems) return false;
+      }
+
+      // Busca múltipla por vírgula
+      if (filterOrderId && !processMultipleOrderSearch(filterOrderId, wu.order.erpOrderId)) return false;
 
       if (filterRoute && wu.order.routeId !== filterRoute) return false;
 
@@ -426,6 +455,86 @@ export default function ConferenciaPage() {
     } catch {
       toast({ title: "Erro", description: "Falha ao bloquear unidades de trabalho", variant: "destructive" });
     }
+  };
+
+  const handleCompleteAll = async () => {
+    // Verificar se há exceções não autorizadas
+    const allExceptions: Exception[] = [];
+    allMyUnits.forEach(wu => {
+      wu.items.forEach((item: ItemWithProduct) => {
+        if (item.exceptions && item.exceptions.length > 0) {
+          item.exceptions.forEach((exc: Exception) => {
+            if (!exc.authorizedBy) {
+              allExceptions.push({
+                ...exc,
+                orderItem: {
+                  ...item,
+                  order: wu.order,
+                },
+              } as any);
+            }
+          });
+        }
+      });
+    });
+
+    if (allExceptions.length > 0) {
+      const userSettings = user?.settings as UserSettings;
+      if (userSettings?.canAuthorizeOwnExceptions) {
+        try {
+          await apiRequest("POST", "/api/exceptions/auto-authorize", {
+            exceptionIds: allExceptions.map(e => e.id),
+          });
+          toast({ title: "Auto-autorização", description: "Exceções autorizadas automaticamente." });
+        } catch (error) {
+          toast({ title: "Erro", description: "Falha ao auto-autorizar exceções", variant: "destructive" });
+          return;
+        }
+      } else {
+        setPendingExceptions(allExceptions);
+        setShowAuthModal(true);
+        return;
+      }
+    }
+
+    // Continuar com finalização normal
+    await finalizeWorkUnits();
+  };
+
+  const finalizeWorkUnits = async () => {
+    try {
+      let anyUnlock = false;
+      for (const wu of allMyUnits) {
+        try {
+          await completeWorkUnitMutation.mutateAsync(wu.id);
+        } catch (error: any) {
+          // Se falhar porque há itens pendentes (outras seções), fazemos apenas unlock
+          if (error.message === "Existem itens pendentes" || error.message?.includes("pendentes")) {
+            console.log(`Unidade ${wu.id} tem itens pendentes de outras seções. Liberando bloqueio.`);
+            await unlockMutation.mutateAsync({ ids: [wu.id], reset: false });
+            anyUnlock = true;
+          } else {
+            throw error;
+          }
+        }
+      }
+      setStep("select");
+      setSelectedWorkUnits([]);
+      clearSession();
+      if (anyUnlock) {
+        toast({ title: "Salvo", description: "Sua parte foi concluída. Pedido liberado para outras seções.", variant: "default" });
+      } else {
+        toast({ title: "Concluído", description: "Conferência finalizada com sucesso", variant: "default" });
+      }
+    } catch (error) {
+      console.error("Error completing work units:", error);
+      toast({ title: "Erro", description: "Falha ao finalizar conferência", variant: "destructive" });
+    }
+  };
+
+  const handleExceptionAuthorized = async () => {
+    await queryClient.invalidateQueries({ queryKey: workUnitsQueryKey });
+    await finalizeWorkUnits();
   };
 
   const handleScanItem = useCallback(async (barcode: string) => {
@@ -501,6 +610,19 @@ export default function ConferenciaPage() {
     const remaining = ap.totalSeparatedQty - ap.checkedQty - ap.exceptionQty;
     if (remaining <= 0) return;
 
+
+
+    // Verificar permissão para quantidade manual
+    // Regra: Apenas switch global do usuário
+    if (!hasManualQtyPermission) {
+      toast({
+        title: "Permissão Negada",
+        description: "Você não tem permissão para alterar quantidade manual",
+        variant: "destructive"
+      });
+      return;
+    }
+
     const effectiveQty = Math.min(qty, remaining);
     const barcode = ap.product.barcode;
     if (!barcode) return;
@@ -537,23 +659,6 @@ export default function ConferenciaPage() {
     } catch {
       setScanStatus("error");
       setScanMessage("Erro ao incrementar");
-    }
-  };
-
-  const handleCompleteAll = async () => {
-    const incompleteUnits = myLockedUnits.filter(wu => wu.status !== "concluido");
-    try {
-      for (const wu of incompleteUnits) {
-        await completeWorkUnitMutation.mutateAsync(wu.id);
-      }
-      clearSession();
-      setStep("select");
-      setSelectedWorkUnits([]);
-      setCurrentProductIndex(0);
-      setCheckingTab("product");
-      toast({ title: "Conferência Concluída!", description: "Todos os itens foram conferidos com sucesso." });
-    } catch {
-      toast({ title: "Erro", description: "Falha ao concluir. Verifique itens pendentes.", variant: "destructive" });
     }
   };
 
@@ -622,7 +727,7 @@ export default function ConferenciaPage() {
             <div className="flex items-center gap-2">
               <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               <Input
-                placeholder="N° Pedido..."
+                placeholder="N° Pedido (separe múltiplos por vírgula)"
                 value={filterOrderId}
                 onChange={(e) => setFilterOrderId(e.target.value)}
                 className="h-8 text-xs"
@@ -664,70 +769,76 @@ export default function ConferenciaPage() {
               ))}
             </div>
           ) : groupedWorkUnits.length > 0 ? (
-            <div className="space-y-1.5">
-              {groupedWorkUnits.map((group) => {
-                const firstWU = group[0];
-                const groupIds = group.map(g => g.id);
-                const isSelected = groupIds.every(id => selectedWorkUnits.includes(id));
-                const lockedByOther = group.some(wu => wu.lockedBy && wu.lockedBy !== user?.id);
-                const lockerName = group.find(wu => wu.lockedBy && wu.lockedBy !== user?.id)?.lockedByName;
+            <div className="space-y-3">
+              {/* Lista com scroll */}
+              <div className="max-h-[400px] overflow-y-auto border rounded-lg">
+                <div className="space-y-1.5 p-2">
+                  {groupedWorkUnits.map((group) => {
+                    const firstWU = group[0];
+                    const groupIds = group.map(g => g.id);
+                    const isSelected = groupIds.every(id => selectedWorkUnits.includes(id));
+                    const lockedByOther = group.some(wu => wu.lockedBy && wu.lockedBy !== user?.id);
+                    const lockerName = group.find(wu => wu.lockedBy && wu.lockedBy !== user?.id)?.lockedByName;
 
-                const totalItems = group.reduce((acc, wu) => {
-                  const items = wu.items || [];
-                  return acc + items.reduce((s, item) => s + Number(item.separatedQty), 0);
-                }, 0);
+                    const distinctProductCount = group.reduce((acc, wu) => {
+                      const items = wu.items || [];
+                      const productIds = new Set(items.map(item => item.productId));
+                      return new Set([...acc, ...productIds]);
+                    }, new Set<string>()).size;
 
-                let createdAt = "";
-                try {
-                  createdAt = format(new Date(firstWU.order.createdAt), "dd/MM HH:mm");
-                } catch {}
+                    let createdAt = "";
+                    try {
+                      createdAt = format(new Date(firstWU.order.createdAt), "dd/MM HH:mm");
+                    } catch { }
 
-                const routeName = routes?.find(r => r.id === firstWU.order.routeId)?.name;
+                    const routeName = routes?.find(r => r.id === firstWU.order.routeId)?.name;
 
-                return (
-                  <div
-                    key={firstWU.orderId}
-                    className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${
-                      lockedByOther
-                        ? "opacity-50 cursor-not-allowed border-border"
-                        : isSelected ? "border-primary bg-primary/5" : "border-border"
-                    }`}
-                    onClick={() => !lockedByOther && handleSelectGroup(group, !isSelected)}
-                    data-testid={`order-group-${firstWU.orderId}`}
-                  >
-                    {lockedByOther ? (
-                      <Lock className="h-4 w-4 text-muted-foreground shrink-0" />
-                    ) : (
-                      <Checkbox
-                        checked={isSelected}
-                        onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
-                        className="shrink-0"
-                        data-testid={`checkbox-order-${firstWU.orderId}`}
-                      />
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-mono text-sm font-semibold">{firstWU.order.erpOrderId}</span>
-                        {routeName && <span className="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded font-medium">Rota: {routeName}</span>}
+                    return (
+                      <div
+                        key={firstWU.orderId}
+                        className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${lockedByOther
+                          ? "opacity-50 cursor-not-allowed border-border"
+                          : isSelected ? "border-primary bg-primary/5" : "border-border"
+                          }`}
+                        onClick={() => !lockedByOther && handleSelectGroup(group, !isSelected)}
+                        data-testid={`order-group-${firstWU.orderId}`}
+                      >
+                        {lockedByOther ? (
+                          <Lock className="h-4 w-4 text-muted-foreground shrink-0" />
+                        ) : (
+                          <Checkbox
+                            checked={isSelected}
+                            onCheckedChange={(checked) => handleSelectGroup(group, !!checked)}
+                            className="shrink-0"
+                            data-testid={`checkbox-order-${firstWU.orderId}`}
+                          />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono text-sm font-semibold">{firstWU.order.erpOrderId}</span>
+                            {routeName && <span className="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded font-medium">Rota: {routeName}</span>}
+                          </div>
+                          <p className="text-xs text-muted-foreground truncate">{firstWU.order.customerName}</p>
+                          {lockedByOther && (
+                            <p className="text-[10px] text-orange-600 font-medium flex items-center gap-1 mt-0.5">
+                              <Lock className="h-3 w-3" />
+                              Em conferência por: {lockerName || "outro usuário"}
+                            </p>
+                          )}
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-medium">{distinctProductCount} produtos</p>
+                          <p className="text-[10px] text-muted-foreground">{createdAt}</p>
+                        </div>
                       </div>
-                      <p className="text-xs text-muted-foreground truncate">{firstWU.order.customerName}</p>
-                      {lockedByOther && (
-                        <p className="text-[10px] text-orange-600 font-medium flex items-center gap-1 mt-0.5">
-                          <Lock className="h-3 w-3" />
-                          Em conferência por: {lockerName || "outro usuário"}
-                        </p>
-                      )}
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-xs font-medium">{totalItems} itens</p>
-                      <p className="text-[10px] text-muted-foreground">{createdAt}</p>
-                    </div>
-                  </div>
-                );
-              })}
+                    );
+                  })}
+                </div>
+              </div>
 
+              {/* Botão fixo separado */}
               <Button
-                className="w-full h-11 text-sm mt-3"
+                className="w-full h-11 text-sm"
                 onClick={handleStartConferencia}
                 disabled={selectedWorkUnits.length === 0 || lockMutation.isPending}
                 data-testid="button-start-conferencia"
@@ -769,7 +880,7 @@ export default function ConferenciaPage() {
             />
           </div>
 
-          <div className="flex-1 overflow-auto">
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             {checkingTab === "product" && currentProduct && (
               <div className="px-3 py-3 space-y-3">
                 <div className="bg-card border border-border rounded-lg p-3 space-y-2.5">
@@ -780,16 +891,16 @@ export default function ConferenciaPage() {
                   </div>
 
                   <p className="text-sm font-medium leading-tight">{currentProduct.product.name}</p>
+                  {currentProduct.product.manufacturer && (
+                    <p className="text-xs text-muted-foreground mt-0.5">Fabricante: {currentProduct.product.manufacturer}</p>
+                  )}
 
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
                     <div>
                       <span className="text-muted-foreground">Código:</span>
                       <span className="ml-1 font-mono font-medium">{currentProduct.product.erpCode}</span>
                     </div>
-                    <div>
-                      <span className="text-muted-foreground">Ref:</span>
-                      <span className="ml-1 font-mono">{currentProduct.product.referenceCode || "—"}</span>
-                    </div>
+
                     <div>
                       <span className="text-muted-foreground">Cód. Barras:</span>
                       <span className="ml-1 font-mono">{currentProduct.product.barcode || "—"}</span>
@@ -812,7 +923,7 @@ export default function ConferenciaPage() {
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
-                      {(hasManualQtyPermission || hasMultiplierPermission) && manualQtyAllowed[currentProduct.product.id] && (
+                      {hasManualQtyPermission && (
                         <>
                           <div className="flex items-center gap-1">
                             <span className="text-xs text-muted-foreground">Qtd:</span>
@@ -823,7 +934,6 @@ export default function ConferenciaPage() {
                               value={multiplierValue}
                               onChange={(e) => setMultiplierValue(Math.max(1, parseInt(e.target.value) || 1))}
                               className="h-10 w-20 text-center text-sm font-bold"
-                              disabled={!hasMultiplierPermission}
                             />
                           </div>
                           <Button
@@ -897,96 +1007,101 @@ export default function ConferenciaPage() {
             )}
 
             {checkingTab === "product" && !currentProduct && aggregatedProducts.length === 0 && (
-              <div className="flex items-center justify-center h-40 text-muted-foreground text-sm">
+              <div className="flex-1 flex items-center justify-center p-4 text-muted-foreground text-sm">
                 Nenhum produto para conferir
               </div>
             )}
 
             {checkingTab === "list" && (
-              <div className="px-3 py-3 space-y-2">
-                {aggregatedProducts.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground text-xs">
-                    Nenhum produto encontrado
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {aggregatedProducts.map((ap, idx) => {
-                      const remaining = ap.totalSeparatedQty - ap.checkedQty - ap.exceptionQty;
-                      const isComplete = remaining <= 0;
-                      const hasException = ap.exceptionQty > 0;
+              <div className="flex flex-col h-full min-h-0">
+                <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
+                  {aggregatedProducts.length === 0 ? (
+                    <div className="text-center py-8 text-muted-foreground text-xs">
+                      Nenhum produto encontrado
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      {aggregatedProducts.map((ap, idx) => {
+                        const remaining = ap.totalSeparatedQty - ap.checkedQty - ap.exceptionQty;
+                        const isComplete = remaining <= 0;
+                        const hasException = ap.exceptionQty > 0;
 
-                      return (
-                        <div
-                          key={ap.product.id}
-                          className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-colors ${
-                            isComplete
+                        return (
+                          <div
+                            key={ap.product.id}
+                            className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-colors ${isComplete
                               ? hasException
                                 ? "bg-amber-50/50 border-amber-200 dark:bg-amber-950/20 dark:border-amber-900/50"
                                 : "bg-green-50/50 border-green-200 dark:bg-green-950/20 dark:border-green-900/50"
                               : "border-border hover:bg-muted/50"
-                          }`}
-                          onClick={() => {
-                            setCurrentProductIndex(idx);
-                            setCheckingTab("product");
-                          }}
-                        >
-                          <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
-                            isComplete
+                              }`}
+                            onClick={() => {
+                              setCurrentProductIndex(idx);
+                              setCheckingTab("product");
+                            }}
+                          >
+                            <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${isComplete
                               ? hasException ? "bg-amber-500 text-white" : "bg-green-500 text-white"
                               : "bg-muted"
-                          }`}>
-                            {isComplete ? (
-                              hasException ? <AlertTriangle className="h-3 w-3" /> : <Check className="h-3 w-3" />
-                            ) : (
-                              <span className="text-[10px] font-medium">{remaining}</span>
-                            )}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-medium truncate">{ap.product.name}</p>
-                            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                              <span className="font-mono">{ap.product.erpCode}</span>
-                              <span>•</span>
-                              <span className="font-mono">{ap.product.barcode || "—"}</span>
+                              }`}>
+                              {isComplete ? (
+                                hasException ? <AlertTriangle className="h-3 w-3" /> : <Check className="h-3 w-3" />
+                              ) : (
+                                <span className="text-[10px] font-medium">{remaining}</span>
+                              )}
                             </div>
-                            <div className="flex items-center gap-1 mt-0.5">
-                              {ap.orderCodes.map(code => (
-                                <span key={code} className="text-[9px] bg-muted px-1 py-0.5 rounded font-mono">{code}</span>
-                              ))}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-medium truncate">{ap.product.name}</p>
+                              {ap.product.manufacturer && (
+                                <p className="text-[10px] text-muted-foreground truncate">Fabricante: {ap.product.manufacturer}</p>
+                              )}
+                              <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                                <span className="font-mono">{ap.product.erpCode}</span>
+                                <span>\u2022</span>
+                                <span className="font-mono">{ap.product.barcode || "\u2014"}</span>
+                              </div>
+                              <div className="flex items-center gap-1 mt-0.5">
+                                {ap.orderCodes.map(code => (
+                                  <span key={code} className="text-[9px] bg-muted px-1 py-0.5 rounded font-mono">{code}</span>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <p className="text-xs font-medium">
+                                {ap.checkedQty}/{ap.totalSeparatedQty}
+                              </p>
+                              {ap.exceptionQty > 0 && (
+                                <span className="text-[10px] text-orange-500">-{ap.exceptionQty}</span>
+                              )}
                             </div>
                           </div>
-                          <div className="text-right shrink-0">
-                            <p className="text-xs font-medium">
-                              {ap.checkedQty}/{ap.totalSeparatedQty}
-                            </p>
-                            {ap.exceptionQty > 0 && (
-                              <span className="text-[10px] text-orange-500">-{ap.exceptionQty}</span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
 
-                <div className="flex gap-2 pt-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="flex-1 h-9 text-xs text-destructive border-destructive/30 hover:bg-destructive/10"
-                    onClick={handleCancelChecking}
-                    disabled={unlockMutation.isPending}
-                  >
-                    Cancelar
-                  </Button>
-                  <Button
-                    size="sm"
-                    className="flex-1 h-9 text-xs bg-green-600 hover:bg-green-700"
-                    onClick={handleCompleteAll}
-                    disabled={!allItemsComplete || completeWorkUnitMutation.isPending}
-                  >
-                    <Check className="h-3.5 w-3.5 mr-1" />
-                    Concluir
-                  </Button>
+                <div className="p-3 border-t bg-background mt-auto">
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 h-9 text-xs text-destructive border-destructive/30 hover:bg-destructive/10"
+                      onClick={handleCancelChecking}
+                      disabled={unlockMutation.isPending}
+                    >
+                      Cancelar
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="flex-1 h-9 text-xs bg-green-600 hover:bg-green-700"
+                      onClick={handleCompleteAll}
+                      disabled={!allItemsComplete || completeWorkUnitMutation.isPending}
+                    >
+                      <Check className="h-3.5 w-3.5 mr-1" />
+                      Concluir
+                    </Button>
+                  </div>
                 </div>
               </div>
             )}
@@ -994,18 +1109,16 @@ export default function ConferenciaPage() {
 
           <nav className="flex border-t border-border bg-card shrink-0">
             <button
-              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${
-                checkingTab === "product" ? "text-primary bg-primary/5" : "text-muted-foreground"
-              }`}
+              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${checkingTab === "product" ? "text-primary bg-primary/5" : "text-muted-foreground"
+                }`}
               onClick={() => setCheckingTab("product")}
             >
               <Package className="h-5 w-5" />
               <span className="text-[10px] font-medium">Produto</span>
             </button>
             <button
-              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${
-                checkingTab === "list" ? "text-primary bg-primary/5" : "text-muted-foreground"
-              }`}
+              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${checkingTab === "list" ? "text-primary bg-primary/5" : "text-muted-foreground"
+                }`}
               onClick={() => setCheckingTab("list")}
             >
               <List className="h-5 w-5" />
@@ -1048,6 +1161,13 @@ export default function ConferenciaPage() {
           isClearing={clearExceptionsMutation.isPending}
         />
       )}
+
+      <ExceptionAuthorizationModal
+        open={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        exceptions={pendingExceptions}
+        onAuthorized={handleExceptionAuthorized}
+      />
     </div>
   );
 }
