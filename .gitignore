@@ -1,4 +1,33 @@
+# Node
 node_modules/
+dist/
+build/
+.vite/
+.next/
+out/
+
+# Cache
+.npm-cache/
+**/.npm-cache/
+**/_cacache/
+**/.cache/
+.npm/
+
+# Env
 .env
-__pycache__/
+.env.*
+
+# Logs
 *.log
+
+# Zips / backups
+*.zip
+*.7z
+*.rar
+
+# Temporários
+.tmp.driveupload/
+
+# SO
+.DS_Store
+Thumbs.db
